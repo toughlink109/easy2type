@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW,
     RegisterClassW, PostQuitMessage, TranslateMessage, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, MSG, CS_HREDRAW, CS_VREDRAW,
-    WM_DESTROY, WM_COMMAND, PM_REMOVE,
+    WM_DESTROY, WM_CLOSE, WM_COMMAND, PM_REMOVE, DestroyWindow,
 };
 
 use crate::state::AppState;
@@ -58,7 +58,13 @@ unsafe extern "system" fn wnd_proc(
     l_param: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_CLOSE => {
+            debug_log!("Main", "WM_CLOSE -> DestroyWindow");
+            let _ = DestroyWindow(hwnd);
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            debug_log!("Main", "WM_DESTROY -> 清理 + PostQuitMessage");
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 let _ = tray.remove();
             }

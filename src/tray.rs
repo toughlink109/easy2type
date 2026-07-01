@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{
     TextOutW, GetDC, ReleaseDC,
     TRANSPARENT, FW_BOLD, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FF_DONTCARE,
-    HDC, HBITMAP,
+    CreateBitmap, PatBlt, WHITENESS,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -21,7 +21,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
-    DestroyMenu, PostMessageW, GetCursorPos, MF_STRING, MF_SEPARATOR,
+    DestroyMenu, DestroyWindow, GetCursorPos, MF_STRING, MF_SEPARATOR,
     TPM_RIGHTBUTTON, TPM_BOTTOMALIGN,
     WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WM_DESTROY,
     LoadIconW, IDI_APPLICATION, HICON, ICONINFO, CreateIconIndirect,
@@ -210,14 +210,9 @@ impl TrayManager {
                 true
             }
             IDM_EXIT => {
-                println!("[Tray] 用户请求退出");
+                debug_log!("Tray", "用户请求退出 -> DestroyWindow");
                 unsafe {
-                    let _ = PostMessageW(
-                        self.hwnd,
-                        WM_DESTROY,
-                        windows::Win32::Foundation::WPARAM(0),
-                        windows::Win32::Foundation::LPARAM(0),
-                    );
+                    let _ = DestroyWindow(self.hwnd);
                 }
                 true
             }
@@ -229,66 +224,81 @@ impl TrayManager {
 // ── v0.4.0: GDI 程序化图标生成 ──
 
 /// 创建托盘图标
-/// 尝试顺序：嵌入资源 IDI_ICON → 系统 IDI_APPLICATION → GDI 绘制 "e"
+/// 尝试顺序：嵌入资源 IDI_ICON → 系统 IDI_APPLICATION → GDI 绘制
 fn create_tray_icon() -> HICON {
     unsafe {
-        // 尝试 1: 嵌入资源 (winres 编译)
+        // 尝试 1: winres 嵌入的资源图标（通过模块实例加载）
         if let Ok(h_inst) = GetModuleHandleW(None) {
             if let Ok(icon) = LoadIconW(h_inst, w!("IDI_ICON")) {
-                debug_log!("Tray", "图标: 嵌入资源 IDI_ICON 加载成功");
+                debug_log!("Tray", "图标: IDI_ICON 嵌入资源 加载成功");
                 return icon;
             }
         }
-        debug_log!("Tray", "图标: IDI_ICON 未找到, 回退 IDI_APPLICATION");
 
-        // 尝试 2: 系统图标
-        if let Ok(h_inst) = GetModuleHandleW(None) {
-            if let Ok(icon) = LoadIconW(h_inst, IDI_APPLICATION) {
-                debug_log!("Tray", "图标: IDI_APPLICATION 加载成功");
-                return icon;
-            }
+        // 尝试 2: 系统标准图标（HINSTANCE=NULL 加载共享系统图标）
+        // IDI_APPLICATION = MAKEINTRESOURCEW(32512)
+        let idi_app: PCWSTR = windows::core::PCWSTR(32512usize as _);
+        if let Ok(icon) = LoadIconW(HINSTANCE::default(), idi_app) {
+            debug_log!("Tray", "图标: 系统 IDI_APPLICATION 加载成功");
+            return icon;
         }
-        debug_log!("Tray", "图标: 系统图标不可用, 使用 GDI 绘制");
+
+        debug_log!("Tray", "图标: 系统图标不可用, GDI 绘制");
 
         // 回退 3: GDI 绘制 32x32 蓝底白字 "e"
         let screen_dc = GetDC(None);
-        let color_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
-        let mask_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        ReleaseDC(None, screen_dc);
-
-        let old_bmp = SelectObject(mem_dc, color_bmp);
-        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00E2904A));
         let rc = RECT { left: 0, top: 0, right: 32, bottom: 32 };
-        let _ = FillRect(mem_dc, &rc, bg);
+
+        // ── 颜色位图: 32x32, 兼容屏幕色彩格式 ──
+        let color_dc = CreateCompatibleDC(screen_dc);
+        let color_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
+        let old_color = SelectObject(color_dc, color_bmp);
+
+        // 蓝底 #4A90E2
+        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00E2904A));
+        let _ = FillRect(color_dc, &rc, bg);
         let _ = DeleteObject(bg);
 
+        // 白色字母 "e"
         let font = CreateFontW(22, 0, 0, 0, FW_BOLD.0 as i32,
             0, 0, 0, DEFAULT_CHARSET.0 as u32,
             OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
             DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
             w!("Segoe UI"));
-        let old_font = SelectObject(mem_dc, font);
-        let _ = SetBkMode(mem_dc, TRANSPARENT);
-        let _ = SetTextColor(mem_dc, windows::Win32::Foundation::COLORREF(0x00FFFFFF));
+        let old_font = SelectObject(color_dc, font);
+        let _ = SetBkMode(color_dc, TRANSPARENT);
+        let _ = SetTextColor(color_dc, windows::Win32::Foundation::COLORREF(0x00FFFFFF));
         let e_wide: Vec<u16> = "e".encode_utf16().collect();
-        let _ = TextOutW(mem_dc, 6, 3, &e_wide);
-        SelectObject(mem_dc, old_font);
-        SelectObject(mem_dc, old_bmp);
+        let _ = TextOutW(color_dc, 6, 3, &e_wide);
+        SelectObject(color_dc, old_font);
         let _ = DeleteObject(font);
+        SelectObject(color_dc, old_color);
 
-        // 掩码位图（全白）
-        let old_bmp2 = SelectObject(mem_dc, mask_bmp);
-        let wb = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00FFFFFF));
-        let _ = FillRect(mem_dc, &rc, wb);
-        let _ = DeleteObject(wb);
-        SelectObject(mem_dc, old_bmp2);
-        let _ = DeleteDC(mem_dc);
+        // ── 掩码位图: 必须用 CreateBitmap 创建 1bpp 单色位图 ──
+        //   CreateCompatibleBitmap 创建的是屏幕色彩位图（32bpp），
+        //   ICONINFO.hbmMask 只接受 1bpp 单色位图！
+        let mask_bmp = CreateBitmap(32, 32, 1, 1, None);
+        let mask_dc = CreateCompatibleDC(screen_dc);
+        let old_mask = SelectObject(mask_dc, mask_bmp);
 
-        let info = ICONINFO { fIcon: BOOL(1), hbmMask: mask_bmp, hbmColor: color_bmp, ..Default::default() };
+        // PatBlt WHITENESS: 所有像素设为 1 = 不透明
+        let _ = PatBlt(mask_dc, 0, 0, 32, 32, WHITENESS);
+
+        SelectObject(mask_dc, old_mask);
+        let _ = DeleteDC(mask_dc);
+        let _ = DeleteDC(color_dc);
+        ReleaseDC(None, screen_dc);
+
+        // ── 创建图标 ──
+        let info = ICONINFO {
+            fIcon: BOOL(1),
+            hbmMask: mask_bmp,
+            hbmColor: color_bmp,
+            ..Default::default()
+        };
         match CreateIconIndirect(&info) {
             Ok(icon) => {
-                debug_log!("Tray", "图标: GDI CreateIconIndirect 成功");
+                debug_log!("Tray", "图标: GDI CreateIconIndirect 成功 (32x32)");
                 let _ = DeleteObject(color_bmp);
                 let _ = DeleteObject(mask_bmp);
                 icon
