@@ -15,6 +15,7 @@ mod tray;
 mod caret;
 mod overlay;
 mod simulate;
+mod settings;
 
 use std::sync::Arc;
 
@@ -39,6 +40,14 @@ const WINDOW_CLASS_NAME: PCWSTR = w!("Easy2TypeMain");
 static mut G_APP_STATE: Option<Arc<AppState>> = None;
 static mut G_TRAY_MANAGER: Option<tray::TrayManager> = None;
 static mut G_OVERLAY: Option<overlay::Overlay> = None;
+
+/// 设置面板显示请求（v0.4.0: 预留 Slint 集成）
+static G_SHOW_SETTINGS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_show_settings() {
+    G_SHOW_SETTINGS.store(true, std::sync::atomic::Ordering::Release);
+}
 
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -142,11 +151,23 @@ unsafe fn run_event_loop(
             println!("[Main] 状态切换: {}", msg);
         }
 
-        // 2b. 快捷键捕获轮询 (v0.4.0)
+        // 2b. 设置面板请求 (v0.4.0)
+        if G_SHOW_SETTINGS.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            println!("[Main] 显示设置面板");
+            #[cfg(feature = "slint-ui")]
+            {
+                // Slint 设置窗口由 settings 模块管理
+                crate::settings::show_window();
+            }
+            #[cfg(not(feature = "slint-ui"))]
+            {
+                println!("[Main] (Slint UI 未编译 — 使用 cargo build --features slint-ui 启用)");
+            }
+        }
+
+        // 2c. 快捷键捕获轮询 (v0.4.0)
         if let Some(combo) = hook::poll_captured_key() {
             println!("[Main] 捕获快捷键: {}", combo);
-            // TODO: v0.4.1 — 根据捕获上下文更新对应 config 字段并保存
-            // app_config.complete_shortcut = combo; app_config.save("config.json");
         }
 
         // 3. 钩子事件
@@ -312,8 +333,14 @@ fn main() {
         let overlay = overlay::Overlay::new(h_instance.into()).expect("创建覆盖层失败");
 
         G_APP_STATE = Some(app_state.clone());
-        let tray_mgr = tray::TrayManager::new(hwnd, app_state.clone())
+        let mut tray_mgr = tray::TrayManager::new(hwnd, app_state.clone())
             .expect("创建托盘图标失败");
+
+        // 注册设置面板回调
+        tray_mgr.on_show_settings = Some(Box::new(|| {
+            request_show_settings();
+        }));
+
         G_TRAY_MANAGER = Some(tray_mgr);
         G_OVERLAY = Some(overlay);
 

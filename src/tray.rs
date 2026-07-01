@@ -1,21 +1,32 @@
-//! tray.rs — 系统托盘图标管理
+//! tray.rs — 系统托盘图标管理 (v0.4.0)
 //!
-//! 使用 Shell_NotifyIconW 创建托盘图标。
+//! 使用 Shell_NotifyIconW 创建托盘图标，GDI 程序化生成图标。
 
 use std::sync::Arc;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, BOOL};
+use windows::Win32::Foundation::{HWND, LPARAM, BOOL, HINSTANCE, RECT};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateCompatibleBitmap, CreateSolidBrush, CreateFontW,
+    FillRect, DeleteDC, DeleteObject, SelectObject, SetBkMode, SetTextColor,
+    TextOutW, GetDC, ReleaseDC,
+    TRANSPARENT, FW_BOLD, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FF_DONTCARE,
+    HDC, HBITMAP,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NIF_MESSAGE, NIF_TIP, NOTIFYICONDATAW,
+    NIF_MESSAGE, NIF_TIP, NIF_ICON, NOTIFYICONDATAW,
+    NIF_STATE, NIS_HIDDEN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
-    DestroyMenu, PostMessageW, GetCursorPos, MF_STRING,
+    DestroyMenu, PostMessageW, GetCursorPos, MF_STRING, MF_SEPARATOR,
     TPM_RIGHTBUTTON, TPM_BOTTOMALIGN,
     WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WM_DESTROY,
+    LoadIconW, IDI_APPLICATION, HICON, ICONINFO, CreateIconIndirect,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use crate::state::AppState;
 
@@ -24,8 +35,9 @@ pub const WM_APP_TRAY: u32 = WM_USER + 1;
 
 /// 菜单命令
 const IDM_TOGGLE: usize = 1001;
-const IDM_ABOUT: usize = 1002;
-const IDM_EXIT: usize = 1003;
+const IDM_SETTINGS: usize = 1002;
+const IDM_ABOUT: usize = 1003;
+const IDM_EXIT: usize = 1004;
 
 /// 托盘管理器
 pub struct TrayManager {
@@ -33,22 +45,27 @@ pub struct TrayManager {
     nid: NOTIFYICONDATAW,
     state: Arc<AppState>,
     visible: bool,
+    /// 设置面板回调（主线程注册）
+    pub on_show_settings: Option<Box<dyn Fn() + Send>>,
 }
 
 impl TrayManager {
     pub fn new(hwnd: HWND, state: Arc<AppState>) -> Result<Self, windows::core::Error> {
-        // szTip 需要是 [u16; 128] 数组
         let mut tip: [u16; 128] = [0; 128];
         let tip_str: Vec<u16> = "easy2type".encode_utf16().collect();
         let copy_len = tip_str.len().min(127);
         tip[..copy_len].copy_from_slice(&tip_str[..copy_len]);
 
+        // 创建程序化托盘图标
+        let h_icon = create_tray_icon();
+
         let nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
             uID: 1,
-            uFlags: NIF_MESSAGE | NIF_TIP,
+            uFlags: NIF_MESSAGE | NIF_TIP | NIF_ICON,
             uCallbackMessage: WM_APP_TRAY,
+            hIcon: h_icon,
             szTip: tip,
             ..Default::default()
         };
@@ -58,6 +75,7 @@ impl TrayManager {
             nid,
             state,
             visible: false,
+            on_show_settings: None,
         };
 
         manager.add_to_tray()?;
@@ -142,6 +160,8 @@ impl TrayManager {
             };
 
             let _ = AppendMenuW(menu, MF_STRING, IDM_TOGGLE, w!("切换状态\tCtrl+T"));
+            let _ = AppendMenuW(menu, MF_STRING, IDM_SETTINGS, w!("设置\tCtrl+,"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, w!(""));
             let _ = AppendMenuW(menu, MF_STRING, IDM_ABOUT, w!("关于 easy2type"));
             let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("退出"));
 
@@ -173,8 +193,15 @@ impl TrayManager {
                 println!("[Tray] {}", msg);
                 true
             }
+            IDM_SETTINGS => {
+                println!("[Tray] 打开设置面板");
+                if let Some(ref cb) = self.on_show_settings {
+                    cb();
+                }
+                true
+            }
             IDM_ABOUT => {
-                println!("easy2type v0.1.0 - Windows 桌面英文输入辅助工具");
+                println!("easy2type v0.4.0 - Windows 桌面英文输入辅助工具");
                 true
             }
             IDM_EXIT => {
@@ -191,5 +218,65 @@ impl TrayManager {
             }
             _ => false,
         }
+    }
+}
+
+// ── v0.4.0: GDI 程序化图标生成 ──
+
+/// 创建托盘图标
+/// 尝试顺序：嵌入资源 IDI_ICON → 系统 IDI_APPLICATION → GDI 绘制 "e"
+fn create_tray_icon() -> HICON {
+    unsafe {
+        if let Ok(h_inst) = GetModuleHandleW(None) {
+            if let Ok(icon) = LoadIconW(h_inst, w!("IDI_ICON")) {
+                return icon;
+            }
+        }
+        if let Ok(h_inst) = GetModuleHandleW(None) {
+            if let Ok(icon) = LoadIconW(h_inst, IDI_APPLICATION) {
+                return icon;
+            }
+        }
+
+        // 回退：GDI 绘制 32x32 蓝底白字 "e"
+        let screen_dc = GetDC(None);
+        let color_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
+        let mask_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        ReleaseDC(None, screen_dc);
+
+        let old_bmp = SelectObject(mem_dc, color_bmp);
+        let bg = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00E2904A));
+        let rc = RECT { left: 0, top: 0, right: 32, bottom: 32 };
+        let _ = FillRect(mem_dc, &rc, bg);
+        let _ = DeleteObject(bg);
+
+        let font = CreateFontW(22, 0, 0, 0, FW_BOLD.0 as i32,
+            0, 0, 0, DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
+            DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
+            w!("Segoe UI"));
+        let old_font = SelectObject(mem_dc, font);
+        let _ = SetBkMode(mem_dc, TRANSPARENT);
+        let _ = SetTextColor(mem_dc, windows::Win32::Foundation::COLORREF(0x00FFFFFF));
+        let e_wide: Vec<u16> = "e".encode_utf16().collect();
+        let _ = TextOutW(mem_dc, 6, 3, &e_wide);
+        SelectObject(mem_dc, old_font);
+        SelectObject(mem_dc, old_bmp);
+        let _ = DeleteObject(font);
+
+        // 掩码位图（全白）
+        let old_bmp2 = SelectObject(mem_dc, mask_bmp);
+        let wb = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00FFFFFF));
+        let _ = FillRect(mem_dc, &rc, wb);
+        let _ = DeleteObject(wb);
+        SelectObject(mem_dc, old_bmp2);
+        let _ = DeleteDC(mem_dc);
+
+        let info = ICONINFO { fIcon: BOOL(1), hbmMask: mask_bmp, hbmColor: color_bmp, ..Default::default() };
+        let icon = CreateIconIndirect(&info).unwrap_or(HICON::default());
+        let _ = DeleteObject(color_bmp);
+        let _ = DeleteObject(mask_bmp);
+        icon
     }
 }
