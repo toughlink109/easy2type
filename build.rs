@@ -42,6 +42,9 @@ fn main() {
     #[cfg(feature = "slint-ui")]
     slint_build::compile("ui/settings.slint").expect("Slint UI 编译失败");
 
+    // ═══ 0b. 嵌入图标资源（MSVC 工具链时自动生效） ═══
+    embed_icon();
+
     // ═══ 1. 判断是否需要下载 ═══
     if Path::new(OUTPUT_PATH).exists() {
         let existing = count_lines(OUTPUT_PATH);
@@ -195,4 +198,32 @@ fn count_lines(path: &str) -> usize {
     fs::read_to_string(path)
         .map(|s| s.lines().count())
         .unwrap_or(0)
+}
+
+/// 使用 winres 嵌入图标资源（仅 MSVC 工具链可用）
+///
+/// GNU 工具链时静默跳过 —— 运行时回退到 GDI 程序化图标。
+fn embed_icon() {
+    // 检查是否有 icon.ico 文件
+    if !Path::new("assets/icon.ico").exists() {
+        println!("cargo:warning=[Build] assets/icon.ico 不存在，跳过图标嵌入");
+        return;
+    }
+
+    match std::panic::catch_unwind(|| {
+        let mut res = winres::WindowsResource::new();
+        res.set_icon("assets/icon.ico");
+        res.set("InternalName", "easy2type");
+        res.set("ProductName", "easy2type");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=[Build] winres 编译失败 (非 MSVC?): {}", e);
+        } else {
+            println!("cargo:warning=[Build] 图标资源嵌入成功");
+        }
+    }) {
+        Ok(_) => {}
+        Err(_) => {
+            println!("cargo:warning=[Build] winres 不可用 (GNU 工具链?), 跳过图标嵌入");
+        }
+    }
 }

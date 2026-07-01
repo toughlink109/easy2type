@@ -13,3 +13,5 @@ pub mod caret;
 pub mod overlay;
 pub mod simulate;
 pub mod settings;
+#[macro_use]
+pub mod logger;

@@ -23,6 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 use crate::config::MAGIC_EXTRA_INFO;
+use crate::debug_log;
 
 // ── 虚拟键码常量（windows 0.58 中部分 VK_* 需要特定 feature，直接定义） ──
 
@@ -120,6 +121,8 @@ pub fn start_hook_thread() -> (
 
 /// 钩子线程主函数：注册钩子 + 消息泵
 fn hook_thread_main(stop_flag: Arc<AtomicBool>) {
+    debug_log!("Hook", "钩子线程启动 tid={:?}", std::thread::current().id());
+
     let h_instance = unsafe {
         windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
             .expect("钩子线程：获取模块句柄失败")
@@ -133,14 +136,17 @@ fn hook_thread_main(stop_flag: Arc<AtomicBool>) {
             0,
         )
     } {
-        Ok(h) => h,
+        Ok(h) => {
+            debug_log!("Hook", "WH_KEYBOARD_LL 注册成功 handle={:?}", h.0);
+            h
+        }
         Err(e) => {
-            eprintln!("[Hook] 注册键盘钩子失败: {:?}", e);
+            debug_log!("Hook", "FATAL: 注册键盘钩子失败: {:?}", e);
             return;
         }
     };
 
-    println!("[Hook] 键盘钩子已注册，进入消息泵");
+    debug_log!("Hook", "进入独立 GetMessageW 消息泵");
 
     let mut msg: std::mem::MaybeUninit<windows::Win32::UI::WindowsAndMessaging::MSG> =
         std::mem::MaybeUninit::uninit();

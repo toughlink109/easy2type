@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
 use crate::state::AppState;
+use crate::debug_log;
 
 /// 托盘消息 ID
 pub const WM_APP_TRAY: u32 = WM_USER + 1;
@@ -88,9 +89,12 @@ impl TrayManager {
             let result = Shell_NotifyIconW(NIM_ADD, &self.nid);
             if result.as_bool() {
                 self.visible = true;
+                debug_log!("Tray", "Shell_NotifyIconW(NIM_ADD) 成功, icon={:?}", self.nid.hIcon.0);
                 Ok(())
             } else {
-                Err(windows::core::Error::from_win32())
+                let err = windows::core::Error::from_win32();
+                debug_log!("Tray", "Shell_NotifyIconW(NIM_ADD) 失败: {:?}", err);
+                Err(err)
             }
         }
     }
@@ -141,10 +145,11 @@ impl TrayManager {
                 let new_mode = self.state.toggle_mode();
                 let _ = self.update_tooltip();
                 let msg = if new_mode.is_active() { "开启" } else { "隐形" };
-                println!("[Tray] 状态切换: {}", msg);
+                debug_log!("Tray", "左键单击 → 状态切换: {}", msg);
                 true
             }
             WM_RBUTTONUP => {
+                debug_log!("Tray", "右键单击 → 弹出菜单");
                 self.show_context_menu();
                 true
             }
@@ -227,18 +232,25 @@ impl TrayManager {
 /// 尝试顺序：嵌入资源 IDI_ICON → 系统 IDI_APPLICATION → GDI 绘制 "e"
 fn create_tray_icon() -> HICON {
     unsafe {
+        // 尝试 1: 嵌入资源 (winres 编译)
         if let Ok(h_inst) = GetModuleHandleW(None) {
             if let Ok(icon) = LoadIconW(h_inst, w!("IDI_ICON")) {
+                debug_log!("Tray", "图标: 嵌入资源 IDI_ICON 加载成功");
                 return icon;
             }
         }
+        debug_log!("Tray", "图标: IDI_ICON 未找到, 回退 IDI_APPLICATION");
+
+        // 尝试 2: 系统图标
         if let Ok(h_inst) = GetModuleHandleW(None) {
             if let Ok(icon) = LoadIconW(h_inst, IDI_APPLICATION) {
+                debug_log!("Tray", "图标: IDI_APPLICATION 加载成功");
                 return icon;
             }
         }
+        debug_log!("Tray", "图标: 系统图标不可用, 使用 GDI 绘制");
 
-        // 回退：GDI 绘制 32x32 蓝底白字 "e"
+        // 回退 3: GDI 绘制 32x32 蓝底白字 "e"
         let screen_dc = GetDC(None);
         let color_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
         let mask_bmp = CreateCompatibleBitmap(screen_dc, 32, 32);
@@ -274,9 +286,19 @@ fn create_tray_icon() -> HICON {
         let _ = DeleteDC(mem_dc);
 
         let info = ICONINFO { fIcon: BOOL(1), hbmMask: mask_bmp, hbmColor: color_bmp, ..Default::default() };
-        let icon = CreateIconIndirect(&info).unwrap_or(HICON::default());
-        let _ = DeleteObject(color_bmp);
-        let _ = DeleteObject(mask_bmp);
-        icon
+        match CreateIconIndirect(&info) {
+            Ok(icon) => {
+                debug_log!("Tray", "图标: GDI CreateIconIndirect 成功");
+                let _ = DeleteObject(color_bmp);
+                let _ = DeleteObject(mask_bmp);
+                icon
+            }
+            Err(e) => {
+                debug_log!("Tray", "图标: GDI CreateIconIndirect 失败 {:?}", e);
+                let _ = DeleteObject(color_bmp);
+                let _ = DeleteObject(mask_bmp);
+                HICON::default()
+            }
+        }
     }
 }

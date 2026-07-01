@@ -16,6 +16,8 @@ mod caret;
 mod overlay;
 mod simulate;
 mod settings;
+#[macro_use]
+mod logger;
 
 use std::sync::Arc;
 
@@ -120,7 +122,9 @@ unsafe fn run_event_loop(
     predictor: predictor::Predictor,
     candidate_limit: usize,
 ) {
-    println!("[Main] 进入主事件循环");
+    debug_log!("Main", "事件循环开始 tid={:?} Slint={}",
+        std::thread::current().id(),
+        if cfg!(feature = "slint-ui") { "ON" } else { "OFF" });
 
     loop {
         // 1. Windows 消息
@@ -153,15 +157,16 @@ unsafe fn run_event_loop(
 
         // 2b. 设置面板请求 (v0.4.0)
         if G_SHOW_SETTINGS.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            println!("[Main] 显示设置面板");
+            debug_log!("Main", "G_SHOW_SETTINGS 触发, Slint={}",
+                if cfg!(feature = "slint-ui") { "已编译" } else { "未编译" });
             #[cfg(feature = "slint-ui")]
             {
-                // Slint 设置窗口由 settings 模块管理
+                debug_log!("Main", "调用 Slint show_window()");
                 crate::settings::show_window();
             }
             #[cfg(not(feature = "slint-ui"))]
             {
-                println!("[Main] (Slint UI 未编译 — 使用 cargo build --features slint-ui 启用)");
+                debug_log!("Main", "Slint 未编译 — 设置面板不可用");
             }
         }
 
@@ -303,65 +308,64 @@ unsafe fn run_event_loop(
 }
 
 fn main() {
-    println!("easy2type v0.3.0 启动中...");
+    logger::init();
+    debug_log!("Main", "easy2type v0.4.0 启动中...");
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .expect("COM 初始化失败");
     }
+    debug_log!("Main", "COM 初始化完成");
 
     let app_config = config::AppConfig::load("config.json");
     let candidate_limit = app_config.candidate_limit;
+    debug_log!("Main", "配置加载: candidates={}", candidate_limit);
 
     let app_state = Arc::new(AppState::new());
     let trie = dictionary::load_dictionary();
     let word_count = trie.word_count();
     let predictor = predictor::Predictor::new(trie);
+    debug_log!("Main", "词库就绪: {} 词", word_count);
 
     let h_instance = unsafe {
         windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
             .expect("获取模块句柄失败")
     };
 
+    // ── 钩子线程: 独立 GetMessageW 消息泵 ──
+    debug_log!("Main", "正在启动钩子线程...");
     let (hook_rx, hook_stop, hook_handle) = hook::start_hook_thread();
+    debug_log!("Main", "钩子线程已启动 (独立消息泵)");
 
     unsafe {
         let hwnd = create_hidden_window(h_instance.into()).expect("创建主窗口失败");
+        debug_log!("Main", "隐藏消息窗口已创建");
 
-        // 创建覆盖层
         let overlay = overlay::Overlay::new(h_instance.into()).expect("创建覆盖层失败");
+        debug_log!("Main", "OSD 覆盖层已创建");
 
         G_APP_STATE = Some(app_state.clone());
         let mut tray_mgr = tray::TrayManager::new(hwnd, app_state.clone())
             .expect("创建托盘图标失败");
+        debug_log!("Main", "托盘图标已创建");
 
         // 注册设置面板回调
         tray_mgr.on_show_settings = Some(Box::new(|| {
+            debug_log!("Tray", "触发设置面板请求");
             request_show_settings();
         }));
 
         G_TRAY_MANAGER = Some(tray_mgr);
         G_OVERLAY = Some(overlay);
 
-        println!("easy2type v0.3.0 已启动");
-        println!("  配置: toggle={}, complete={}, candidates={}, modifier={}",
-            app_config.toggle_shortcut,
-            app_config.complete_shortcut,
-            candidate_limit,
-            app_config.modifier_key);
-        println!("  Ctrl+T: 切换状态");
-        println!("  Tab:    补全候选 #1");
-        println!("  Ctrl+1~{}: 选择对应候选词", candidate_limit);
-        println!("  (模糊纠错: 容错 {} 编辑距离, 词库 {} 词)",
-            config::MAX_FUZZY_DISTANCE,
-            word_count);
-
+        debug_log!("Main", "进入主事件循环");
         run_event_loop(hook_rx, hook_stop, app_state, predictor, candidate_limit);
 
+        debug_log!("Main", "主循环退出, 等待钩子线程...");
         let _ = hook_handle.join();
         CoUninitialize();
     }
 
-    println!("easy2type 已退出");
+    debug_log!("Main", "easy2type 已退出");
 }

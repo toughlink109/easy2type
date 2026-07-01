@@ -34,3 +34,4 @@ slint-ui = ["slint"]
 
 [build-dependencies]
 slint-build = { version = "1", optional = true }
+winres = "0.1"
