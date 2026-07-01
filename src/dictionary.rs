@@ -100,6 +100,80 @@ impl Trie {
     pub fn best_match(&self, prefix: &str) -> Option<String> {
         self.search(prefix).into_iter().next().map(|(w, _)| w)
     }
+
+    /// 模糊搜索：基于 Levenshtein 编辑距离，在 Trie 中查找所有
+    /// 编辑距离 ≤ max_distance 的单词，按权重降序返回。
+    ///
+    /// 算法说明：
+    /// 使用 DP 行向量（row）表示当前 Trie 路径与查询字符串的编辑距离。
+    /// 遍历时若当前行的最小值 > max_distance，则整条子树均可剪枝，
+    /// 避免穷举整个词库。
+    pub fn fuzzy_search(&self, query: &str, max_distance: usize) -> Vec<(String, u32)> {
+        if query.is_empty() {
+            return vec![];
+        }
+
+        let query_chars: Vec<char> = query.chars().collect();
+        let query_len = query_chars.len();
+
+        // 初始行: [0, 1, 2, ..., query_len]
+        let initial_row: Vec<usize> = (0..=query_len).collect();
+
+        let mut results: Vec<(String, u32)> = Vec::new();
+        let mut stack: Vec<(usize, String, Vec<usize>)> = Vec::new();
+
+        // 从根节点的每个子节点开始搜索，避免将空串纳入匹配
+        for (&ch, &child_idx) in &self.nodes[0].children {
+            let row = Self::compute_row(&initial_row, &query_chars, ch);
+            stack.push((child_idx, ch.to_string(), row));
+        }
+
+        while let Some((node_idx, current_word, row)) = stack.pop() {
+            let node = &self.nodes[node_idx];
+
+            // 若当前行存在可行解且是单词节点 → 收录
+            let dist = row[query_len];
+            if node.is_word && dist <= max_distance {
+                results.push((current_word.clone(), node.weight));
+            }
+
+            // 若当前行的最小值超过 max_distance → 剪枝
+            if row.iter().min().copied().unwrap_or(usize::MAX) > max_distance {
+                continue;
+            }
+
+            // 继续向子节点扩展
+            for (&ch, &child_idx) in &node.children {
+                let new_row = Self::compute_row(&row, &query_chars, ch);
+                let mut next_word = current_word.clone();
+                next_word.push(ch);
+                stack.push((child_idx, next_word, new_row));
+            }
+        }
+
+        // 按权重降序排序
+        results.sort_by(|a, b| b.1.cmp(&a.1));
+
+        results
+    }
+
+    /// 计算 Levenshtein DP 的下一行
+    #[inline]
+    fn compute_row(prev_row: &[usize], query_chars: &[char], ch: char) -> Vec<usize> {
+        let m = prev_row.len() - 1; // query 长度
+        let mut new_row = Vec::with_capacity(prev_row.len());
+        new_row.push(prev_row[0] + 1); // row[0] = 上一行首元素 + 1（删除）
+
+        for j in 1..=m {
+            let cost = if ch == query_chars[j - 1] { 0 } else { 1 };
+            let min = (new_row[j - 1] + 1) // 插入
+                .min(prev_row[j] + 1) // 删除
+                .min(prev_row[j - 1] + cost); // 替换
+            new_row.push(min);
+        }
+
+        new_row
+    }
 }
 
 /// 加载词频表并构建前缀树
@@ -181,5 +255,91 @@ mod tests {
         // "env" should predict "environment"
         let best = trie.best_match("env");
         assert!(best.is_some());
+    }
+
+    // ── 模糊搜索测试 ──
+
+    #[test]
+    fn test_fuzzy_exact_match() {
+        let mut trie = Trie::new();
+        trie.insert("environment", 100);
+        trie.insert("envelope", 50);
+
+        // 精确输入应能通过模糊搜索命中（编辑距离为 0）
+        let results = trie.fuzzy_search("environment", 2);
+        assert!(results.iter().any(|(w, _)| w == "environment"));
+    }
+
+    #[test]
+    fn test_fuzzy_one_edit() {
+        let mut trie = Trie::new();
+        trie.insert("environment", 100);
+        trie.insert("entertain", 50);
+
+        // 拼写错误：缺少一个字母 "enviroment" (少了一个 n)
+        let results = trie.fuzzy_search("enviroment", 1);
+        // environment 的编辑距离为 1（插入 n），entertain 距离 > 1
+        assert!(results.iter().any(|(w, _)| w == "environment"));
+    }
+
+    #[test]
+    fn test_fuzzy_two_edits() {
+        let mut trie = Trie::new();
+        trie.insert("environment", 100);
+
+        // 两个错误：enviromant → environment (m→n, a→e)
+        let results = trie.fuzzy_search("enviromant", 2);
+        assert!(results.iter().any(|(w, _)| w == "environment"));
+    }
+
+    #[test]
+    fn test_fuzzy_too_far() {
+        let mut trie = Trie::new();
+        trie.insert("environment", 100);
+
+        // 距离 3+ 的输入不应该匹配
+        let results = trie.fuzzy_search("xyz", 2);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_empty_query() {
+        let mut trie = Trie::new();
+        trie.insert("test", 100);
+        assert!(trie.fuzzy_search("", 2).is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_weight_sorting() {
+        let mut trie = Trie::new();
+        trie.insert("cat", 10);
+        trie.insert("car", 100);
+        trie.insert("cab", 50);
+
+        // "ca" 精确前缀应匹配以上三个单词
+        let results = trie.fuzzy_search("ca", 2);
+        assert_eq!(results[0].0, "car"); // 最高权重
+        assert_eq!(results[1].0, "cab");
+        assert_eq!(results[2].0, "cat");
+    }
+
+    #[test]
+    fn test_fuzzy_typo_extra_char() {
+        let mut trie = Trie::new();
+        trie.insert("the", 100);
+
+        // 多打了一个字母 "thhe"
+        let results = trie.fuzzy_search("thhe", 1);
+        assert!(results.iter().any(|(w, _)| w == "the"));
+    }
+
+    #[test]
+    fn test_fuzzy_typo_wrong_char() {
+        let mut trie = Trie::new();
+        trie.insert("the", 100);
+
+        // 打错一个字母 "tha"
+        let results = trie.fuzzy_search("tha", 1);
+        assert!(results.iter().any(|(w, _)| w == "the"));
     }
 }

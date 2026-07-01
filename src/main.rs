@@ -172,13 +172,24 @@ unsafe fn run_event_loop(
                         BufferAction::UpdatePrediction => {
                             let buf = app_state.get_buffer();
                             if !buf.is_empty() {
-                                if let Some(pred) = predictor.predict(&buf) {
+                                if let Some((pred, is_fuzzy)) = predictor.predict_best(&buf) {
                                     *app_state.prediction.lock().unwrap() = Some(pred.clone());
 
                                     // 获取光标位置并显示 OSD
                                     if let Some(caret) = caret::get_caret_pos() {
                                         if let Some(ref overlay) = G_OVERLAY {
-                                            let display_text = format!("{}", pred);
+                                            // 模糊匹配时在预测文本前标注 "~"
+                                            let display_text = if is_fuzzy {
+                                                format!("~{}", pred)
+                                            } else {
+                                                pred.clone()
+                                            };
+                                            if is_fuzzy {
+                                                println!(
+                                                    "[Main] 模糊匹配: '{}' -> '{}'",
+                                                    buf, pred
+                                                );
+                                            }
                                             overlay.show(&display_text, caret);
                                         }
                                     }
@@ -247,6 +258,7 @@ fn main() {
         println!("easy2type 已启动");
         println!("  Ctrl+T: 切换状态");
         println!("  Tab:    补全预测单词");
+        println!("  (支持模糊匹配: 容错 {} 个编辑距离)", config::MAX_FUZZY_DISTANCE);
 
         run_event_loop(hook_rx, hook_stop, app_state, predictor);
 

@@ -28,3 +28,14 @@ pub const CARET_FALLBACK_OFFSET_Y: i32 = 20;
 /// 托盘提示文本
 pub const TRAY_TOOLTIP_ACTIVE: &str = "easy2type: 开启中";
 pub const TRAY_TOOLTIP_INVISIBLE: &str = "easy2type: 已隐形";
+
+/// ── 模糊匹配 ──
+
+/// 模糊搜索的最大编辑距离（允许的拼写错误次数）
+pub const MAX_FUZZY_DISTANCE: usize = 2;
+
+/// 触发模糊搜索的最小前缀长度（避免过短的输入产生大量误匹配）
+pub const FUZZY_MIN_PREFIX_LEN: usize = 3;
+
+/// 模糊搜索返回的最大候选数量
+pub const MAX_FUZZY_CANDIDATES: usize = 5;
