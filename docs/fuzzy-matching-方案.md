@@ -163,7 +163,53 @@ predict_best("enviroment")
 
 ---
 
-## 6. 后续计划
+## 6. 词库来源与构建流程
+
+### 6.1 数据源
+
+使用 [first20hours/google-10000-english](https://github.com/first20hours/google-10000-english) 开源词库，基于 **Google Trillion Word Corpus** 提取的高频英文单词，按词频降序排列。
+
+| 版本 | URL | 规模 |
+|---|---|---|
+| 精简版 | `google-10000-english-usa-no-swears-medium.txt` | ~10,000 词 |
+| **完整版** ★ | `google-10000-english-no-swears.txt` | ~10,000 词（当前使用） |
+
+### 6.2 自动化构建流程（build.rs）
+
+```
+cargo build
+  │
+  ├── build.rs 启动
+  │     │
+  │     ├── assets/words.txt 已存在且 ≥ 1000 行?
+  │     │     └── 是 → 跳过（避免重复下载）
+  │     │
+  │     ├── 下载: curl（主） → PowerShell（回退）
+  │     │     └── 下载到 assets/words_raw.txt
+  │     │
+  │     ├── 清洗:
+  │     │     ├── 过滤空行和含空白行
+  │     │     ├── 统一转小写
+  │     │     ├── 权重赋值: weight = 总行数 - 行号
+  │     │     └── 输出: assets/words.txt (word<TAB>frequency)
+  │     │
+  │     └── 清理临时文件
+  │
+  └── cargo 继续编译 → dictionary.rs 通过 include_str! 嵌入词库
+```
+
+### 6.3 当前词库规模
+
+| 指标 | 值 |
+|---|---|
+| 单词数 | 9,894 |
+| 最高频词 | `the` (权重 9894) |
+| 最低频词 | `poison` (权重 1) |
+| 文件大小 | ~97 KB |
+
+---
+
+## 7. 后续计划
 
 - [ ] 多候选切换（按 Tab 循环选择第 2、3 个候选）
 - [ ] 候选列表 OSD 展示（当前仅显示一个最佳匹配）
