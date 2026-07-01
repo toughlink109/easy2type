@@ -29,6 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassW, PostQuitMessage, TranslateMessage, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, MSG, CS_HREDRAW, CS_VREDRAW,
     WM_DESTROY, WM_CLOSE, WM_COMMAND, PM_REMOVE, DestroyWindow,
+    WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
 use crate::state::AppState;
@@ -73,16 +74,24 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_COMMAND => {
             let cmd_id = (w_param.0 & 0xFFFF) as u32;
+            debug_log!("Main", "WM_COMMAND cmd_id={} (raw_wparam=0x{:x})", cmd_id, w_param.0);
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 if tray.handle_menu_command(cmd_id) {
+                    debug_log!("Main", "菜单命令 {} 已处理", cmd_id);
                     return LRESULT(0);
                 }
             }
+            debug_log!("Main", "菜单命令 {} 未处理 (TrayManager 不可用?)", cmd_id);
             DefWindowProcW(hwnd, msg, w_param, l_param)
         }
         m if m == WM_APP_TRAY => {
+            let event = l_param.0 as u32;
+            debug_log!("Main", "WM_APP_TRAY event={} (LBUTTONUP={} RBUTTONUP={})",
+                event, WM_LBUTTONUP, WM_RBUTTONUP);
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 tray.handle_message(l_param);
+            } else {
+                debug_log!("Main", "WM_APP_TRAY: TrayManager 不可用");
             }
             LRESULT(0)
         }

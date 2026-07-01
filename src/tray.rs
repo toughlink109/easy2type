@@ -22,7 +22,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
     DestroyMenu, DestroyWindow, GetCursorPos, MF_STRING, MF_SEPARATOR,
-    TPM_RIGHTBUTTON, TPM_BOTTOMALIGN,
+    TPM_RIGHTBUTTON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_NONOTIFY,
     WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WM_DESTROY,
     LoadIconW, IDI_APPLICATION, HICON, ICONINFO, CreateIconIndirect,
 };
@@ -157,7 +157,7 @@ impl TrayManager {
         }
     }
 
-    fn show_context_menu(&self) {
+    fn show_context_menu(&mut self) {
         unsafe {
             let menu = match CreatePopupMenu() {
                 Ok(m) => m,
@@ -175,9 +175,11 @@ impl TrayManager {
             let mut pt = std::mem::zeroed();
             GetCursorPos(&mut pt);
 
-            let _cmd = TrackPopupMenu(
+            // TPM_RETURNCMD: 直接返回菜单 ID 而非发送 WM_COMMAND
+            // TPM_NONOTIFY: 不发送任何通知消息
+            let cmd = TrackPopupMenu(
                 menu,
-                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+                TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
                 pt.x,
                 pt.y,
                 0,
@@ -185,7 +187,41 @@ impl TrayManager {
                 None,
             );
 
+            if cmd.0 != 0 {
+                debug_log!("Tray", "菜单选中 cmd_id={}", cmd.0);
+                self.handle_menu_command_direct(cmd.0 as usize);
+            }
             DestroyMenu(menu);
+        }
+    }
+
+    /// 直接处理菜单命令（由 show_context_menu 调用）
+    fn handle_menu_command_direct(&mut self, cmd_id: usize) {
+        match cmd_id {
+            IDM_TOGGLE => {
+                let new_mode = self.state.toggle_mode();
+                let _ = self.update_tooltip();
+                let msg = if new_mode.is_active() { "开启" } else { "隐形" };
+                debug_log!("Tray", "切换状态 → {}", msg);
+            }
+            IDM_SETTINGS => {
+                debug_log!("Tray", "打开设置面板");
+                if let Some(ref cb) = self.on_show_settings {
+                    cb();
+                }
+            }
+            IDM_ABOUT => {
+                debug_log!("Tray", "关于: easy2type v0.4.0");
+            }
+            IDM_EXIT => {
+                debug_log!("Tray", "退出");
+                unsafe {
+                    let _ = DestroyWindow(self.hwnd);
+                }
+            }
+            _ => {
+                debug_log!("Tray", "未知菜单命令: {}", cmd_id);
+            }
         }
     }
 
