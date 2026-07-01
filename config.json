@@ -1,0 +1,6 @@
+{
+    "toggle_shortcut": "Ctrl+T",
+    "complete_shortcut": "Tab",
+    "candidate_limit": 4,
+    "modifier_key": "Ctrl"
+}

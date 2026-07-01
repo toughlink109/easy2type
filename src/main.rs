@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::state::AppState;
 use crate::buffer::BufferAction;
 use crate::tray::WM_APP_TRAY;
-use crate::hook::VK_TAB;
+use crate::hook::{VK_TAB, is_digit_key};
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("Easy2TypeMain");
 
@@ -106,6 +106,7 @@ unsafe fn run_event_loop(
     hook_stop: Arc<std::sync::atomic::AtomicBool>,
     app_state: Arc<AppState>,
     predictor: predictor::Predictor,
+    candidate_limit: usize,
 ) {
     println!("[Main] 进入主事件循环");
 
@@ -147,18 +148,50 @@ unsafe fn run_event_loop(
                         continue;
                     }
 
-                    // ── Tab 补全 ──
+                    // ── Ctrl+数字键: 直接选候选词（不经过 buffer） ──
+                    if event.ctrl_down && is_digit_key(event.vk_code) {
+                        let digit = (event.vk_code - '0' as u32) as usize;
+                        // 数字键 1~7 对应索引 0~6
+                        if digit >= 1 && digit <= 7 {
+                            let idx = digit - 1;
+                            if let Some(ref overlay) = G_OVERLAY {
+                                if let Some((word, _)) = overlay.selected_info() {
+                                    // 先更新选中高亮
+                                    overlay.set_selected(idx);
+                                    // 用当前选中的词执行补全
+                                    let buffer_len = app_state.get_buffer().len();
+                                    if buffer_len > 0 {
+                                        let selected = overlay.selected_word()
+                                            .unwrap_or(word);
+                                        println!(
+                                            "[Main] Ctrl+{} 选中 #{}, 补全: '{}' -> '{}'",
+                                            digit, digit,
+                                            app_state.get_buffer(), selected
+                                        );
+                                        simulate::complete_word(buffer_len, &selected);
+                                        app_state.clear_buffer();
+                                        *app_state.prediction.lock().unwrap() = None;
+                                        overlay.hide();
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // ── Tab 补全（默认选中第 1 个候选） ──
                     if event.vk_code == VK_TAB {
-                        let prediction = app_state.prediction.lock().unwrap().clone();
-                        if let Some(ref word) = prediction {
-                            let buffer_len = app_state.get_buffer().len();
-                            // 只要缓冲区有内容就执行补全（模糊纠错时错词长度可 ≥ 正确词长度）
-                            if buffer_len > 0 {
-                                println!("[Main] Tab 补全: '{}' -> '{}'", app_state.get_buffer(), word);
-                                simulate::complete_word(buffer_len, word);
-                                app_state.clear_buffer();
-                                *app_state.prediction.lock().unwrap() = None;
-                                if let Some(ref overlay) = G_OVERLAY {
+                        let buffer_len = app_state.get_buffer().len();
+                        if buffer_len > 0 {
+                            if let Some(ref overlay) = G_OVERLAY {
+                                if let Some((word, idx)) = overlay.selected_info() {
+                                    println!(
+                                        "[Main] Tab 补全 #{}: '{}' -> '{}'",
+                                        idx + 1, app_state.get_buffer(), word
+                                    );
+                                    simulate::complete_word(buffer_len, &word);
+                                    app_state.clear_buffer();
+                                    *app_state.prediction.lock().unwrap() = None;
                                     overlay.hide();
                                 }
                             }
@@ -173,26 +206,33 @@ unsafe fn run_event_loop(
                         BufferAction::UpdatePrediction => {
                             let buf = app_state.get_buffer();
                             if !buf.is_empty() {
-                                if let Some((pred, distance)) = predictor.suggest(&buf) {
-                                    *app_state.prediction.lock().unwrap() = Some(pred.clone());
+                                let candidates = predictor.suggest_top_n(
+                                    &buf,
+                                    candidate_limit,
+                                );
 
-                                    // 获取光标位置并显示 OSD
+                                if !candidates.is_empty() {
+                                    // 存储最佳预测以兼容旧逻辑
+                                    *app_state.prediction.lock().unwrap() =
+                                        Some(candidates[0].word.clone());
+
+                                    // 显示多候选悬浮窗
                                     if let Some(caret) = caret::get_caret_pos() {
                                         if let Some(ref overlay) = G_OVERLAY {
-                                            // 编辑距离 = 0 → 精确前缀补全
-                                            // 编辑距离 > 0 → 模糊纠错（前缀 "~"）
-                                            let display_text = if distance > 0 {
-                                                format!("~{}", pred)
-                                            } else {
-                                                pred.clone()
-                                            };
-                                            if distance > 0 {
+                                            if candidates[0].distance > 0 {
                                                 println!(
-                                                    "[Main] 模糊纠错 (距离={}): '{}' -> '{}'",
-                                                    distance, buf, pred
+                                                    "[Main] 模糊纠错 (距离={}): '{}' -> '{}' (共 {} 候选)",
+                                                    candidates[0].distance,
+                                                    buf,
+                                                    candidates[0].word,
+                                                    candidates.len()
                                                 );
                                             }
-                                            overlay.show(&display_text, caret);
+                                            overlay.show_candidates(
+                                                &buf,
+                                                &candidates,
+                                                caret,
+                                            );
                                         }
                                     }
                                 } else {
@@ -226,13 +266,16 @@ unsafe fn run_event_loop(
 }
 
 fn main() {
-    println!("easy2type v0.1.0 启动中...");
+    println!("easy2type v0.3.0 启动中...");
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .expect("COM 初始化失败");
     }
+
+    let app_config = config::AppConfig::load("config.json");
+    let candidate_limit = app_config.candidate_limit;
 
     let app_state = Arc::new(AppState::new());
     let trie = dictionary::load_dictionary();
@@ -258,14 +301,20 @@ fn main() {
         G_TRAY_MANAGER = Some(tray_mgr);
         G_OVERLAY = Some(overlay);
 
-        println!("easy2type v0.2.0 已启动");
+        println!("easy2type v0.3.0 已启动");
+        println!("  配置: toggle={}, complete={}, candidates={}, modifier={}",
+            app_config.toggle_shortcut,
+            app_config.complete_shortcut,
+            candidate_limit,
+            app_config.modifier_key);
         println!("  Ctrl+T: 切换状态");
-        println!("  Tab:    补全/纠错（精确前缀 or 模糊纠错）");
-        println!("  (模糊纠错: 容错 {} 个编辑距离, 词库 {} 词)",
+        println!("  Tab:    补全候选 #1");
+        println!("  Ctrl+1~{}: 选择对应候选词", candidate_limit);
+        println!("  (模糊纠错: 容错 {} 编辑距离, 词库 {} 词)",
             config::MAX_FUZZY_DISTANCE,
             word_count);
 
-        run_event_loop(hook_rx, hook_stop, app_state, predictor);
+        run_event_loop(hook_rx, hook_stop, app_state, predictor, candidate_limit);
 
         let _ = hook_handle.join();
         CoUninitialize();

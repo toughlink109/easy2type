@@ -39,3 +39,96 @@ pub const FUZZY_MIN_PREFIX_LEN: usize = 3;
 
 /// 模糊搜索返回的最大候选数量
 pub const MAX_FUZZY_CANDIDATES: usize = 5;
+
+/// ── v0.3.0 多候选 ──
+
+/// OSD 候选窗默认候选数量（可配置范围 4~7）
+pub const CANDIDATE_LIMIT: usize = 4;
+
+/// 修饰键名称（"Ctrl" 或 "Alt"）
+pub const MODIFIER_KEY: &str = "Ctrl";
+
+// ── v0.3.0 运行时配置 ──
+
+/// 应用配置（支持 config.json 覆盖）
+#[derive(Debug, Clone)]
+pub struct AppConfig {
+    /// 切换开关快捷键，如 "Ctrl+T"
+    pub toggle_shortcut: String,
+    /// 补全快捷键，如 "Tab"
+    pub complete_shortcut: String,
+    /// 候选词上限（4~7）
+    pub candidate_limit: usize,
+    /// 候选选择修饰键，"Ctrl" 或 "Alt"
+    pub modifier_key: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            toggle_shortcut: "Ctrl+T".to_string(),
+            complete_shortcut: "Tab".to_string(),
+            candidate_limit: 4,
+            modifier_key: "Ctrl".to_string(),
+        }
+    }
+}
+
+/// 从 JSON 字符串中提取指定键的字符串值
+fn extract_json_string(json: &str, key: &str) -> Option<String> {
+    let search = format!("\"{}\"", key);
+    let pos = json.find(&search)?;
+    let rest = &json[pos + search.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    if let Some(start) = after.find('"') {
+        let inner = &after[start + 1..];
+        if let Some(end) = inner.find('"') {
+            return Some(inner[..end].to_string());
+        }
+    }
+    None
+}
+
+/// 从 JSON 字符串中提取指定键的数值
+fn extract_json_number(json: &str, key: &str) -> Option<usize> {
+    let search = format!("\"{}\"", key);
+    let pos = json.find(&search)?;
+    let rest = &json[pos + search.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    // 收集连续数字字符
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+impl AppConfig {
+    /// 从 JSON 文件加载配置，文件不存在或格式错误时返回默认值
+    pub fn load(path: &str) -> Self {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("[Config] 无法读取 {} ({}), 使用默认配置", path, e);
+                return Self::default();
+            }
+        };
+
+        let mut cfg = Self::default();
+
+        if let Some(v) = extract_json_string(&content, "toggle_shortcut") {
+            cfg.toggle_shortcut = v;
+        }
+        if let Some(v) = extract_json_string(&content, "complete_shortcut") {
+            cfg.complete_shortcut = v;
+        }
+        if let Some(v) = extract_json_string(&content, "modifier_key") {
+            cfg.modifier_key = v;
+        }
+        if let Some(v) = extract_json_number(&content, "candidate_limit") {
+            cfg.candidate_limit = v.clamp(4, 7);
+        }
+
+        println!("[Config] 配置已加载: {:?}", cfg);
+        cfg
+    }
+}

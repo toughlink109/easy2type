@@ -9,6 +9,13 @@
 use crate::dictionary::Trie;
 use crate::config;
 
+/// 候选词条目
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    pub word: String,
+    pub distance: usize, // 0 = 精确前缀, 1~2 = 模糊纠错
+}
+
 /// 预测引擎
 pub struct Predictor {
     trie: Trie,
@@ -80,6 +87,60 @@ impl Predictor {
         }
 
         None
+    }
+
+    /// v0.3.0: 返回排名前 N 的候选词列表
+    ///
+    /// 策略：
+    /// 1. 先收集精确前缀匹配结果（距离=0），按词频 DESC
+    /// 2. 再收集模糊纠错结果（距离=1~2）
+    /// 3. 合并后按 (距离 ASC, 词频 DESC) 排序，取前 limit 个
+    pub fn suggest_top_n(&self, input: &str, limit: usize) -> Vec<Candidate> {
+        if input.is_empty() || limit == 0 {
+            return vec![];
+        }
+
+        let lower = input.to_lowercase();
+
+        // ── 阶段 1: 精确前缀匹配 ──
+        let exact_matches: Vec<_> = self
+            .trie
+            .search(&lower)
+            .into_iter()
+            .map(|(word, _)| Candidate { word, distance: 0 })
+            .collect();
+
+        if exact_matches.len() >= limit {
+            return exact_matches.into_iter().take(limit).collect();
+        }
+
+        // ── 阶段 2: 模糊纠错 ──
+        let mut fuzzy_matches = Vec::new();
+        if lower.len() >= config::FUZZY_MIN_PREFIX_LEN {
+            let fuzzy = self
+                .trie
+                .fuzzy_search_with_distance(&lower, config::MAX_FUZZY_DISTANCE);
+            for (word, weight, dist) in fuzzy {
+                // 跳过已出现在精确匹配中的词
+                if !exact_matches.iter().any(|c| c.word == word) {
+                    fuzzy_matches.push((word, weight, dist));
+                }
+            }
+        }
+
+        // 模糊结果按 (距离 ASC, 权重 DESC) 排序
+        fuzzy_matches.sort_by(|a, b| a.2.cmp(&b.2).then(b.1.cmp(&a.1)));
+
+        let fuzzy_candidates: Vec<Candidate> = fuzzy_matches
+            .into_iter()
+            .map(|(word, _, dist)| Candidate { word, distance: dist })
+            .collect();
+
+        // 合并: 精确在前，模糊在后
+        let mut all = exact_matches;
+        all.extend(fuzzy_candidates);
+        all.truncate(limit);
+        all
     }
 
     /// 模糊搜索：查找编辑距离 ≤ max_distance 的所有单词（按权重降序）
