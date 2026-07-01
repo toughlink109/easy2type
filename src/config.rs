@@ -131,4 +131,18 @@ impl AppConfig {
         println!("[Config] 配置已加载: {:?}", cfg);
         cfg
     }
+
+    /// 将配置保存为 JSON 文件
+    pub fn save(&self, path: &str) -> std::io::Result<()> {
+        let json = format!(
+            "{{\n    \"toggle_shortcut\": \"{}\",\n    \"complete_shortcut\": \"{}\",\n    \"candidate_limit\": {},\n    \"modifier_key\": \"{}\"\n}}\n",
+            self.toggle_shortcut,
+            self.complete_shortcut,
+            self.candidate_limit,
+            self.modifier_key,
+        );
+        std::fs::write(path, json)?;
+        println!("[Config] 配置已保存到 {}", path);
+        Ok(())
+    }
 }

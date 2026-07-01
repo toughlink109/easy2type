@@ -1,6 +1,9 @@
 //! easy2type — Windows 桌面英文输入辅助工具
 //!
-//! 入口点：创建隐藏消息窗口、启动钩子线程、初始化托盘/词库/覆盖层。
+//! 入口点：Slint 事件循环 + 钩子线程 + 托盘 + 覆盖层。
+//! Release 模式隐藏控制台，Debug 保留便于调试。
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
 mod state;
@@ -130,7 +133,6 @@ unsafe fn run_event_loop(
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 let _ = tray.update_tooltip();
             }
-            // 切换至隐形时隐藏 OSD
             if !new_mode.is_active() {
                 if let Some(ref overlay) = G_OVERLAY {
                     overlay.hide();
@@ -140,10 +142,24 @@ unsafe fn run_event_loop(
             println!("[Main] 状态切换: {}", msg);
         }
 
+        // 2b. 快捷键捕获轮询 (v0.4.0)
+        if let Some(combo) = hook::poll_captured_key() {
+            println!("[Main] 捕获快捷键: {}", combo);
+            // TODO: v0.4.1 — 根据捕获上下文更新对应 config 字段并保存
+            // app_config.complete_shortcut = combo; app_config.save("config.json");
+        }
+
         // 3. 钩子事件
         loop {
             match hook_rx.try_recv() {
                 Ok(hook::HookCommand::Key(event)) => {
+                    // ── Ctrl+Shift+T: 启动快捷键捕获模式 ──
+                    if event.ctrl_down && event.shift_down && event.vk_code == 'T' as u32 {
+                        println!("[Main] 进入快捷键捕获模式");
+                        hook::start_key_capture();
+                        continue;
+                    }
+
                     if !app_state.get_mode().is_active() {
                         continue;
                     }

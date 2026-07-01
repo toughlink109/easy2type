@@ -38,6 +38,10 @@ const TEMP_PATH: &str = "assets/words_raw.txt";
 const SKIP_MIN_LINES: usize = 1000;
 
 fn main() {
+    // ═══ 0. 编译 Slint UI 文件（仅在 slint-ui feature 启用时） ═══
+    #[cfg(feature = "slint-ui")]
+    slint_build::compile("ui/settings.slint").expect("Slint UI 编译失败");
+
     // ═══ 1. 判断是否需要下载 ═══
     if Path::new(OUTPUT_PATH).exists() {
         let existing = count_lines(OUTPUT_PATH);

@@ -1,8 +1,8 @@
 [package]
 name = "easy2type"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Windows 桌面英文输入辅助工具 — Inline 单词预测与补全"
+description = "Windows 桌面英文输入辅助工具 — Slint 孟菲斯风 + 模糊纠错"
 
 [lib]
 name = "easy2type"
@@ -26,6 +26,11 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
 ] }
+slint = { version = "1", optional = true }
+
+[features]
+default = []
+slint-ui = ["slint"]
+
 [build-dependencies]
-# winres 需要 Windows SDK 的 rc.exe，MVP 阶段暂不引入
-# 后续通过嵌入 manifest 文件设置 DPI 感知
+slint-build = { version = "1", optional = true }

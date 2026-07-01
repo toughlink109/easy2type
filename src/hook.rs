@@ -31,6 +31,7 @@ pub const VK_TAB: u32 = 0x09;
 pub const VK_RETURN: u32 = 0x0D;
 pub const VK_SHIFT: u32 = 0x10;
 pub const VK_CONTROL: u32 = 0x11;
+pub const VK_MENU: u32 = 0x12; // Alt 键
 pub const VK_CAPITAL: u32 = 0x14;
 pub const VK_ESCAPE: u32 = 0x1B;
 pub const VK_SPACE: u32 = 0x20;
@@ -69,6 +70,15 @@ static G_HOOK_SENDER: Mutex<Option<Sender<HookCommand>>> = Mutex::new(None);
 
 /// Ctrl+T 切换请求标志
 static G_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 快捷键捕获模式（true = 正在监听下一个组合键）
+static G_KEY_CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// 已捕获的快捷键字符串（如 "Ctrl+T"）
+static G_CAPTURED_KEY: Mutex<Option<String>> = Mutex::new(None);
+
+/// 已捕获标志（主线程轮询后清除）
+static G_KEY_CAPTURED: AtomicBool = AtomicBool::new(false);
 
 // ── 数据结构 ──
 
@@ -176,9 +186,25 @@ unsafe extern "system" fn keyboard_hook_proc(
 
         let vk_code = kb.vkCode;
 
-        // Ctrl/Shift 状态
+        // Ctrl/Shift/Alt 状态
         let ctrl_down = GetAsyncKeyState(VK_CONTROL as i32) < 0;
         let shift_down = GetAsyncKeyState(VK_SHIFT as i32) < 0;
+        let alt_down = GetAsyncKeyState(VK_MENU as i32) < 0;
+
+        // ── 快捷键捕获模式 ──
+        if G_KEY_CAPTURE_MODE.load(Ordering::Acquire) {
+            // 只捕获带修饰键的组合键（Ctrl/Alt/Shift + 字母键）
+            if (ctrl_down || alt_down) && is_letter_key(vk_code) {
+                let letter = (vk_code - 'A' as u32) as u8 + b'A';
+                let combo = format_key_combo(ctrl_down, alt_down, shift_down, letter as char);
+                *G_CAPTURED_KEY.lock().unwrap() = Some(combo);
+                G_KEY_CAPTURED.store(true, Ordering::Release);
+                G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
+                // 吞噬此按键，不传递给应用
+                return CallNextHookEx(None, n_code, w_param, l_param);
+            }
+            // 非组合键不捕获，继续正常处理
+        }
 
         // Ctrl+T → 切换标志
         if ctrl_down && vk_code == 'T' as u32 {
@@ -307,4 +333,42 @@ pub fn vk_to_char(vk_code: u32, shift_down: bool) -> Option<char> {
     } else {
         None
     }
+}
+
+// ── v0.4.0 快捷键捕获 ──
+
+/// 格式化组合键字符串（如 "Ctrl+Shift+T"）
+fn format_key_combo(ctrl: bool, alt: bool, shift: bool, key: char) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if ctrl  { parts.push("Ctrl".into()); }
+    if alt   { parts.push("Alt".into()); }
+    if shift { parts.push("Shift".into()); }
+    parts.push(key.to_uppercase().to_string());
+    parts.join("+")
+}
+
+/// 进入快捷键捕获模式（主线程调用）
+pub fn start_key_capture() {
+    *G_CAPTURED_KEY.lock().unwrap() = None;
+    G_KEY_CAPTURED.store(false, Ordering::Release);
+    G_KEY_CAPTURE_MODE.store(true, Ordering::Release);
+}
+
+/// 退出捕获模式
+pub fn cancel_key_capture() {
+    G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
+}
+
+/// 检查是否有快捷键被捕获，返回组合键字符串并清除
+pub fn poll_captured_key() -> Option<String> {
+    if G_KEY_CAPTURED.swap(false, Ordering::AcqRel) {
+        G_CAPTURED_KEY.lock().unwrap().take()
+    } else {
+        None
+    }
+}
+
+/// 检查当前是否处于捕获模式
+pub fn is_capturing() -> bool {
+    G_KEY_CAPTURE_MODE.load(Ordering::Relaxed)
 }
