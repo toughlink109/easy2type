@@ -101,6 +101,11 @@ impl Trie {
         self.search(prefix).into_iter().next().map(|(w, _)| w)
     }
 
+    /// 词库中单词总数
+    pub fn word_count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_word).count()
+    }
+
     /// 模糊搜索：基于 Levenshtein 编辑距离，在 Trie 中查找所有
     /// 编辑距离 ≤ max_distance 的单词，按权重降序返回。
     ///
@@ -109,6 +114,21 @@ impl Trie {
     /// 遍历时若当前行的最小值 > max_distance，则整条子树均可剪枝，
     /// 避免穷举整个词库。
     pub fn fuzzy_search(&self, query: &str, max_distance: usize) -> Vec<(String, u32)> {
+        self.fuzzy_search_with_distance(query, max_distance)
+            .into_iter()
+            .map(|(w, wt, _)| (w, wt))
+            .collect()
+    }
+
+    /// 模糊搜索（带编辑距离）：返回 `(单词, 权重, 编辑距离)` 三元组。
+    ///
+    /// 与 `fuzzy_search` 相同的 Levenshtein + Trie 剪枝算法，
+    /// 额外返回每个匹配词与查询的实际编辑距离。
+    pub fn fuzzy_search_with_distance(
+        &self,
+        query: &str,
+        max_distance: usize,
+    ) -> Vec<(String, u32, usize)> {
         if query.is_empty() {
             return vec![];
         }
@@ -119,7 +139,7 @@ impl Trie {
         // 初始行: [0, 1, 2, ..., query_len]
         let initial_row: Vec<usize> = (0..=query_len).collect();
 
-        let mut results: Vec<(String, u32)> = Vec::new();
+        let mut results: Vec<(String, u32, usize)> = Vec::new();
         let mut stack: Vec<(usize, String, Vec<usize>)> = Vec::new();
 
         // 从根节点的每个子节点开始搜索，避免将空串纳入匹配
@@ -131,10 +151,10 @@ impl Trie {
         while let Some((node_idx, current_word, row)) = stack.pop() {
             let node = &self.nodes[node_idx];
 
-            // 若当前行存在可行解且是单词节点 → 收录
+            // 若当前行存在可行解且是单词节点 → 收录（含编辑距离）
             let dist = row[query_len];
             if node.is_word && dist <= max_distance {
-                results.push((current_word.clone(), node.weight));
+                results.push((current_word.clone(), node.weight, dist));
             }
 
             // 若当前行的最小值超过 max_distance → 剪枝
@@ -151,7 +171,7 @@ impl Trie {
             }
         }
 
-        // 按权重降序排序
+        // 按权重降序排序（调用方可再按距离排序）
         results.sort_by(|a, b| b.1.cmp(&a.1));
 
         results
@@ -341,5 +361,66 @@ mod tests {
         // 打错一个字母 "tha"
         let results = trie.fuzzy_search("tha", 1);
         assert!(results.iter().any(|(w, _)| w == "the"));
+    }
+
+    // ── 性能基准（release 模式运行: cargo test --release -- --ignored --nocapture） ──
+
+    #[test]
+    #[ignore]
+    fn bench_fuzzy_real_world() {
+        let trie = load_dictionary();
+
+        let cases = [
+            ("env", "精确前缀（短）"),
+            ("enviroment", "缺 1 字母"),
+            ("wnat", "字母颠倒"),
+            ("diferent", "缺 1 字母"),
+            ("accomedation", "错 2 字母"),
+            ("zzzzz", "无匹配剪枝"),
+            ("acomodation", "缺 2 字母"),
+        ];
+
+        use std::time::Instant;
+        println!("\n========== 模糊搜索性能（词库: 9894 词）==========\n");
+
+        let mut total = 0u128;
+        let mut count = 0u64;
+
+        for (input, desc) in &cases {
+            const WARMUP: usize = 50;
+            const ITERS: usize = 500;
+
+            for _ in 0..WARMUP {
+                let _ = trie.fuzzy_search(input, 2);
+            }
+
+            let start = Instant::now();
+            let mut result = Vec::new();
+            for _ in 0..ITERS {
+                result = trie.fuzzy_search(input, 2);
+            }
+            let elapsed = start.elapsed();
+            let avg_us = elapsed.as_micros() as f64 / ITERS as f64;
+            let top = result.first().map(|(w, _)| w.as_str()).unwrap_or("(无)");
+
+            println!(
+                "  {:<18} → {:>15}  |  {:.1} μs/次  |  {}",
+                desc, top, avg_us, if result.is_empty() { "❌" } else { "✅" }
+            );
+
+            total += elapsed.as_micros();
+            count += ITERS as u64;
+        }
+
+        let avg = total as f64 / count as f64;
+        println!("\n───────────────────────────────────────────────");
+        println!("  总查询: {} 次 | 平均: {:.1} μs/次", count, avg);
+        println!(
+            "  延迟要求: < 5000 μs → {}",
+            if avg < 5000.0 { "✅ 达标" } else { "❌ 超标" }
+        );
+        println!("  (5000 μs = 5ms 商业化标准)\n");
+
+        assert!(avg < 5000.0, "模糊搜索平均延迟应 < 5ms");
     }
 }

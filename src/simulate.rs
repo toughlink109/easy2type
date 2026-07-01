@@ -84,18 +84,22 @@ fn send_unicode_char(ch: char) {
     }
 }
 
-/// Tab 补全：删除已打字符 + 输入完整单词
-pub fn complete_word(prefix_len: usize, full_word: &str) {
+/// Tab 补全：先精确退格 `buffer_len` 次彻底删除错词/残缺词，再输入完整正确单词。
+///
+/// # 参数
+/// - `buffer_len`: 输入缓冲区当前内容长度（需删除的字符数）
+/// - `correct_word`: 要输入的完整正确单词
+pub fn complete_word(buffer_len: usize, correct_word: &str) {
     println!(
-        "[Simulate] 补全: 删除 {} 字符, 输入 '{}'",
-        prefix_len, full_word
+        "[Simulate] 补全: 退格 {} 次, 输入 '{}'",
+        buffer_len, correct_word
     );
 
-    for _ in 0..prefix_len {
+    for _ in 0..buffer_len {
         tap_key(VK_BACK);
     }
 
-    for ch in full_word.chars() {
+    for ch in correct_word.chars() {
         send_unicode_char(ch);
     }
 }

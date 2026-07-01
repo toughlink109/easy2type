@@ -1,8 +1,12 @@
 [package]
 name = "easy2type"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Windows 桌面英文输入辅助工具 — Inline 单词预测与补全"
+
+[lib]
+name = "easy2type"
+path = "src/lib.rs"
 
 [[bin]]
 name = "easy2type"

@@ -151,10 +151,11 @@ unsafe fn run_event_loop(
                     if event.vk_code == VK_TAB {
                         let prediction = app_state.prediction.lock().unwrap().clone();
                         if let Some(ref word) = prediction {
-                            let prefix_len = app_state.get_buffer().len();
-                            if prefix_len > 0 && prefix_len < word.len() {
+                            let buffer_len = app_state.get_buffer().len();
+                            // 只要缓冲区有内容就执行补全（模糊纠错时错词长度可 ≥ 正确词长度）
+                            if buffer_len > 0 {
                                 println!("[Main] Tab 补全: '{}' -> '{}'", app_state.get_buffer(), word);
-                                simulate::complete_word(prefix_len, word);
+                                simulate::complete_word(buffer_len, word);
                                 app_state.clear_buffer();
                                 *app_state.prediction.lock().unwrap() = None;
                                 if let Some(ref overlay) = G_OVERLAY {
@@ -172,22 +173,23 @@ unsafe fn run_event_loop(
                         BufferAction::UpdatePrediction => {
                             let buf = app_state.get_buffer();
                             if !buf.is_empty() {
-                                if let Some((pred, is_fuzzy)) = predictor.predict_best(&buf) {
+                                if let Some((pred, distance)) = predictor.suggest(&buf) {
                                     *app_state.prediction.lock().unwrap() = Some(pred.clone());
 
                                     // 获取光标位置并显示 OSD
                                     if let Some(caret) = caret::get_caret_pos() {
                                         if let Some(ref overlay) = G_OVERLAY {
-                                            // 模糊匹配时在预测文本前标注 "~"
-                                            let display_text = if is_fuzzy {
+                                            // 编辑距离 = 0 → 精确前缀补全
+                                            // 编辑距离 > 0 → 模糊纠错（前缀 "~"）
+                                            let display_text = if distance > 0 {
                                                 format!("~{}", pred)
                                             } else {
                                                 pred.clone()
                                             };
-                                            if is_fuzzy {
+                                            if distance > 0 {
                                                 println!(
-                                                    "[Main] 模糊匹配: '{}' -> '{}'",
-                                                    buf, pred
+                                                    "[Main] 模糊纠错 (距离={}): '{}' -> '{}'",
+                                                    distance, buf, pred
                                                 );
                                             }
                                             overlay.show(&display_text, caret);
@@ -234,6 +236,7 @@ fn main() {
 
     let app_state = Arc::new(AppState::new());
     let trie = dictionary::load_dictionary();
+    let word_count = trie.word_count();
     let predictor = predictor::Predictor::new(trie);
 
     let h_instance = unsafe {
@@ -255,10 +258,12 @@ fn main() {
         G_TRAY_MANAGER = Some(tray_mgr);
         G_OVERLAY = Some(overlay);
 
-        println!("easy2type 已启动");
+        println!("easy2type v0.2.0 已启动");
         println!("  Ctrl+T: 切换状态");
-        println!("  Tab:    补全预测单词");
-        println!("  (支持模糊匹配: 容错 {} 个编辑距离)", config::MAX_FUZZY_DISTANCE);
+        println!("  Tab:    补全/纠错（精确前缀 or 模糊纠错）");
+        println!("  (模糊纠错: 容错 {} 个编辑距离, 词库 {} 词)",
+            config::MAX_FUZZY_DISTANCE,
+            word_count);
 
         run_event_loop(hook_rx, hook_stop, app_state, predictor);
 
