@@ -9,7 +9,7 @@
 //! **线程安全铁律**：注册钩子的线程必须运行消息泵（GetMessageW 循环），
 //! 否则 Windows 会在几秒后静默丢弃钩子。
 
-use std::sync::mpsc::Sender;
+use crossbeam::channel::Sender;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -66,8 +66,11 @@ pub const VK_OEM_102: u32 = 0xE2;    // <> on non-US keyboards
 
 // ── 全局变量：供 keyboard_hook_proc（extern fn）访问 ──
 
-/// 全局消息发送器
+/// 全局消息发送器 (crossbeam)
 static G_HOOK_SENDER: Mutex<Option<Sender<HookCommand>>> = Mutex::new(None);
+
+/// OSD 覆盖层可见标志（供钩子回调读取，决定是否吞数字键）
+static G_OSD_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 /// Ctrl+T 切换请求标志
 static G_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -98,15 +101,17 @@ pub struct KeyEvent {
 pub enum HookCommand {
     Key(KeyEvent),
     ToggleMode,
+    /// 数字键直选候选词（n = 0-based index）
+    SelectN(usize),
 }
 
 /// 启动键盘钩子线程
 pub fn start_hook_thread() -> (
-    std::sync::mpsc::Receiver<HookCommand>,
+    crossbeam::channel::Receiver<HookCommand>,
     Arc<AtomicBool>,
     thread::JoinHandle<()>,
 ) {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = crossbeam::channel::unbounded();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = Arc::clone(&stop_flag);
 
@@ -186,9 +191,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
 
         let is_key_down = w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
-        if !is_key_down {
-            return CallNextHookEx(None, n_code, w_param, l_param);
-        }
+        let is_key_up = w_param.0 as u32 == 0x0101; // WM_KEYUP = 0x0101
 
         let vk_code = kb.vkCode;
 
@@ -197,24 +200,41 @@ unsafe extern "system" fn keyboard_hook_proc(
         let shift_down = GetAsyncKeyState(VK_SHIFT as i32) < 0;
         let alt_down = GetAsyncKeyState(VK_MENU as i32) < 0;
 
+        // ── 数字键 1~9 直选候选词（仅 OSD 可见 + 无 Ctrl/Alt） ──
+        if G_OSD_VISIBLE.load(Ordering::Relaxed) && is_digit_key(vk_code) && !ctrl_down && !alt_down {
+            if is_key_down {
+                let n = (vk_code - '0' as u32) as usize;
+                if n >= 1 && n <= 9 {
+                    if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
+                        let _ = tx.send(HookCommand::SelectN(n - 1)); // 0-based index
+                    }
+                }
+            }
+            // 无论 KEYDOWN 还是 KEYUP，都吞掉数字键（阻止传递到应用）
+            return LRESULT(1);
+        }
+
         // ── 快捷键捕获模式 ──
         if G_KEY_CAPTURE_MODE.load(Ordering::Acquire) {
-            // 只捕获带修饰键的组合键（Ctrl/Alt/Shift + 字母键）
-            if (ctrl_down || alt_down) && is_letter_key(vk_code) {
+            if is_key_down && (ctrl_down || alt_down) && is_letter_key(vk_code) {
                 let letter = (vk_code - 'A' as u32) as u8 + b'A';
                 let combo = format_key_combo(ctrl_down, alt_down, shift_down, letter as char);
                 *G_CAPTURED_KEY.lock().unwrap() = Some(combo);
                 G_KEY_CAPTURED.store(true, Ordering::Release);
                 G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
-                // 吞噬此按键，不传递给应用
-                return CallNextHookEx(None, n_code, w_param, l_param);
+                return LRESULT(1);
             }
-            // 非组合键不捕获，继续正常处理
         }
 
-        // Ctrl+T → 切换标志
-        if ctrl_down && vk_code == 'T' as u32 {
-            G_TOGGLE_REQUESTED.store(true, Ordering::Release);
+        // Ctrl+T → 通过 channel 发送 ToggleMode
+        if is_key_down && ctrl_down && vk_code == 'T' as u32 {
+            if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
+                let _ = tx.send(HookCommand::ToggleMode);
+            }
+            return LRESULT(1);
+        }
+
+        if !is_key_down {
             return CallNextHookEx(None, n_code, w_param, l_param);
         }
 
@@ -237,9 +257,10 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(None, n_code, w_param, l_param)
 }
 
-/// 检查并清除 Ctrl+T 切换请求
-pub fn check_toggle_request() -> bool {
-    G_TOGGLE_REQUESTED.swap(false, Ordering::AcqRel)
+/// 设置 OSD 覆盖层可见状态（主线程调用）
+/// 为 true 时，钩子会吞掉数字键 1~9 并将其转为 SelectN 命令
+pub fn set_osd_visible(visible: bool) {
+    G_OSD_VISIBLE.store(visible, Ordering::Release);
 }
 
 // ── 键盘分类工具函数 ──

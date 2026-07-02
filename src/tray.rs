@@ -260,26 +260,27 @@ impl TrayManager {
 // ── v0.4.0: GDI 程序化图标生成 ──
 
 /// 创建托盘图标
-/// 尝试顺序：嵌入资源 IDI_ICON → 系统 IDI_APPLICATION → GDI 绘制
+/// 尝试顺序：嵌入资源 ID=101 → IDI_ICON（名称） → GDI 绘制
 fn create_tray_icon() -> HICON {
     unsafe {
-        // 尝试 1: winres 嵌入的资源图标（通过模块实例加载）
+        // 尝试 1: winres 嵌入资源 ID=101 (custom icon)
         if let Ok(h_inst) = GetModuleHandleW(None) {
-            if let Ok(icon) = LoadIconW(h_inst, w!("IDI_ICON")) {
-                debug_log!("Tray", "图标: IDI_ICON 嵌入资源 加载成功");
+            let icon_id: PCWSTR = windows::core::PCWSTR(crate::config::IDI_ICON_ID as *const u16);
+            if let Ok(icon) = LoadIconW(h_inst, icon_id) {
+                debug_log!("Tray", "图标: 资源 ID={} 加载成功", crate::config::IDI_ICON_ID);
                 return icon;
             }
         }
 
-        // 尝试 2: 系统标准图标（HINSTANCE=NULL 加载共享系统图标）
-        // IDI_APPLICATION = MAKEINTRESOURCEW(32512)
-        let idi_app: PCWSTR = windows::core::PCWSTR(32512usize as _);
-        if let Ok(icon) = LoadIconW(HINSTANCE::default(), idi_app) {
-            debug_log!("Tray", "图标: 系统 IDI_APPLICATION 加载成功");
-            return icon;
+        // 尝试 2: 按名称查找 IDI_ICON
+        if let Ok(h_inst) = GetModuleHandleW(None) {
+            if let Ok(icon) = LoadIconW(h_inst, w!("IDI_ICON")) {
+                debug_log!("Tray", "图标: IDI_ICON (名称) 加载成功");
+                return icon;
+            }
         }
 
-        debug_log!("Tray", "图标: 系统图标不可用, GDI 绘制");
+        debug_log!("Tray", "图标: 嵌入资源均未找到, GDI 绘制");
 
         // 回退 3: GDI 绘制 32x32 蓝底白字 "e"
         let screen_dc = GetDC(None);

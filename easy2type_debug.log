@@ -1,0 +1,40 @@
+
+════════ 03:03:22.102 会话启动 ════════
+[03:03:22.102] [ThreadId(1)] [Main] easy2type v0.4.0 启动中...
+[03:03:22.103] [ThreadId(1)] [Main] COM 初始化完成
+[03:03:22.103] [ThreadId(1)] [Main] 配置加载: candidates=4
+[03:03:22.114] [ThreadId(1)] [Main] 词库就绪: 9894 词
+[03:03:22.114] [ThreadId(1)] [Main] 正在启动钩子线程...
+[03:03:22.114] [ThreadId(1)] [Main] 钩子线程已启动 (独立消息泵)
+[03:03:22.115] [ThreadId(2)] [Hook] 钩子线程启动 tid=ThreadId(2)
+[03:03:22.115] [ThreadId(2)] [Hook] WH_KEYBOARD_LL 注册成功 handle=0x35e919d7
+[03:03:22.115] [ThreadId(2)] [Hook] 进入独立 GetMessageW 消息泵
+[03:03:22.124] [ThreadId(1)] [Main] 隐藏消息窗口已创建
+[03:03:22.130] [ThreadId(1)] [Main] OSD 覆盖层已创建
+[03:03:22.130] [ThreadId(1)] [Tray] 图标: 嵌入资源均未找到, GDI 绘制
+[03:03:22.131] [ThreadId(1)] [Tray] 图标: GDI CreateIconIndirect 成功 (32x32)
+[03:03:22.140] [ThreadId(1)] [Tray] Shell_NotifyIconW(NIM_ADD) 成功, icon=0x28ca1a1b
+[03:03:22.140] [ThreadId(1)] [Main] 托盘图标已创建
+[03:03:22.140] [ThreadId(1)] [Main] 进入主事件循环
+[03:03:22.140] [ThreadId(1)] [Main] 事件循环开始 tid=ThreadId(1) Slint=OFF
+[03:04:31.758] [ThreadId(1)] [Main] SelectN(0)
+[03:04:31.759] [ThreadId(1)] [Main] 数字1选词: 'lajid' -> 'laid'
+
+════════ 03:05:38.595 会话启动 ════════
+[03:05:38.596] [ThreadId(1)] [Main] easy2type v0.4.0 启动中...
+[03:05:38.597] [ThreadId(1)] [Main] COM 初始化完成
+[03:05:38.597] [ThreadId(1)] [Main] 配置加载: candidates=4
+[03:05:38.607] [ThreadId(1)] [Main] 词库就绪: 9894 词
+[03:05:38.607] [ThreadId(1)] [Main] 正在启动钩子线程...
+[03:05:38.607] [ThreadId(1)] [Main] 钩子线程已启动 (独立消息泵)
+[03:05:38.607] [ThreadId(2)] [Hook] 钩子线程启动 tid=ThreadId(2)
+[03:05:38.608] [ThreadId(2)] [Hook] WH_KEYBOARD_LL 注册成功 handle=0x7c271903
+[03:05:38.608] [ThreadId(2)] [Hook] 进入独立 GetMessageW 消息泵
+[03:05:38.617] [ThreadId(1)] [Main] 隐藏消息窗口已创建
+[03:05:38.621] [ThreadId(1)] [Main] OSD 覆盖层已创建
+[03:05:38.621] [ThreadId(1)] [Tray] 图标: 嵌入资源均未找到, GDI 绘制
+[03:05:38.623] [ThreadId(1)] [Tray] 图标: GDI CreateIconIndirect 成功 (32x32)
+[03:05:38.634] [ThreadId(1)] [Tray] Shell_NotifyIconW(NIM_ADD) 成功, icon=0x1e003ab
+[03:05:38.634] [ThreadId(1)] [Main] 托盘图标已创建
+[03:05:38.634] [ThreadId(1)] [Main] 进入主事件循环
+[03:05:38.634] [ThreadId(1)] [Main] 事件循环开始 tid=ThreadId(1) Slint=OFF

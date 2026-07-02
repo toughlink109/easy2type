@@ -3,7 +3,7 @@
 //! 入口点：Slint 事件循环 + 钩子线程 + 托盘 + 覆盖层。
 //! Release 模式隐藏控制台，Debug 保留便于调试。
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 
 mod config;
 mod state;
@@ -131,7 +131,7 @@ unsafe fn create_hidden_window(h_instance: HINSTANCE) -> Result<HWND, windows::c
 }
 
 unsafe fn run_event_loop(
-    hook_rx: std::sync::mpsc::Receiver<hook::HookCommand>,
+    hook_rx: crossbeam::channel::Receiver<hook::HookCommand>,
     hook_stop: Arc<std::sync::atomic::AtomicBool>,
     app_state: Arc<AppState>,
     predictor: predictor::Predictor,
@@ -148,29 +148,14 @@ unsafe fn run_event_loop(
             if msg.message == WM_DESTROY {
                 hook_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                println!("[Main] 退出");
+                debug_log!("Main", "退出");
                 return;
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
-        // 2. Ctrl+T 切换
-        if hook::check_toggle_request() {
-            let new_mode = app_state.toggle_mode();
-            if let Some(ref mut tray) = G_TRAY_MANAGER {
-                let _ = tray.update_tooltip();
-            }
-            if !new_mode.is_active() {
-                if let Some(ref overlay) = G_OVERLAY {
-                    overlay.hide();
-                }
-            }
-            let msg = if new_mode.is_active() { "开启" } else { "隐形" };
-            println!("[Main] 状态切换: {}", msg);
-        }
-
-        // 2b. 设置面板请求 (v0.4.0)
+        // 2. 设置面板请求 (v0.4.0)
         if G_SHOW_SETTINGS.swap(false, std::sync::atomic::Ordering::AcqRel) {
             debug_log!("Main", "G_SHOW_SETTINGS 触发, Slint={}",
                 if cfg!(feature = "slint-ui") { "已编译" } else { "未编译" });
@@ -187,16 +172,48 @@ unsafe fn run_event_loop(
 
         // 2c. 快捷键捕获轮询 (v0.4.0)
         if let Some(combo) = hook::poll_captured_key() {
-            println!("[Main] 捕获快捷键: {}", combo);
+            debug_log!("Main", "[Main] 捕获快捷键: {}", combo);
         }
 
         // 3. 钩子事件
         loop {
             match hook_rx.try_recv() {
+                Ok(hook::HookCommand::ToggleMode) => {
+                    let new_mode = app_state.toggle_mode();
+                    if let Some(ref mut tray) = G_TRAY_MANAGER {
+                        let _ = tray.update_tooltip();
+                    }
+                    if !new_mode.is_active() {
+                        if let Some(ref overlay) = G_OVERLAY {
+                            overlay.hide();
+                            hook::set_osd_visible(false);
+                        }
+                    }
+                    debug_log!("Main", "ToggleMode -> {}", if new_mode.is_active() { "开启" } else { "隐形" });
+                    continue;
+                }
+                Ok(hook::HookCommand::SelectN(n)) => {
+                    debug_log!("Main", "SelectN({})", n);
+                    let buffer_len = app_state.get_buffer().len();
+                    if buffer_len > 0 {
+                        if let Some(ref overlay) = G_OVERLAY {
+                            overlay.set_selected(n);
+                            if let Some((word, _)) = overlay.selected_info() {
+                                debug_log!("Main", "数字{}选词: '{}' -> '{}'", n + 1, app_state.get_buffer(), word);
+                                simulate::complete_word(buffer_len, &word);
+                                app_state.clear_buffer();
+                                *app_state.prediction.lock().unwrap() = None;
+                                overlay.hide();
+                                hook::set_osd_visible(false);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 Ok(hook::HookCommand::Key(event)) => {
                     // ── Ctrl+Shift+T: 启动快捷键捕获模式 ──
                     if event.ctrl_down && event.shift_down && event.vk_code == 'T' as u32 {
-                        println!("[Main] 进入快捷键捕获模式");
+                        debug_log!("Main", "[Main] 进入快捷键捕获模式");
                         hook::start_key_capture();
                         continue;
                     }
@@ -290,12 +307,14 @@ unsafe fn run_event_loop(
                                                 &candidates,
                                                 caret,
                                             );
+                                            hook::set_osd_visible(true);
                                         }
                                     }
                                 } else {
                                     *app_state.prediction.lock().unwrap() = None;
                                     if let Some(ref overlay) = G_OVERLAY {
                                         overlay.hide();
+                                        hook::set_osd_visible(false);
                                     }
                                 }
                             }
@@ -304,15 +323,16 @@ unsafe fn run_event_loop(
                             *app_state.prediction.lock().unwrap() = None;
                             if let Some(ref overlay) = G_OVERLAY {
                                 overlay.hide();
+                                hook::set_osd_visible(false);
                             }
                         }
                         BufferAction::NoOp => {}
                     }
                 }
                 Ok(hook::HookCommand::ToggleMode) => {}
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    println!("[Main] 钩子 channel 断开");
+                Err(crossbeam::channel::TryRecvError::Empty) => break,
+                Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                    debug_log!("Main", "[Main] 钩子 channel 断开");
                     return;
                 }
             }

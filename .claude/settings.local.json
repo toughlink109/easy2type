@@ -4,7 +4,8 @@
       "Bash(rustc --version)",
       "Bash(cargo --version)",
       "Bash(curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs)",
-      "Bash(sh -s -- -y)"
+      "Bash(sh -s -- -y)",
+      "Bash(git commit *)"
     ]
   }
 }

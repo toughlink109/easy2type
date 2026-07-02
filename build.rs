@@ -42,7 +42,8 @@ fn main() {
     #[cfg(feature = "slint-ui")]
     slint_build::compile("ui/settings.slint").expect("Slint UI 编译失败");
 
-    // ═══ 0b. 嵌入图标资源（MSVC 工具链时自动生效） ═══
+    // ═══ 0b. 生成/嵌入图标资源 ═══
+    generate_icon_if_missing();
     embed_icon();
 
     // ═══ 1. 判断是否需要下载 ═══
@@ -200,11 +201,102 @@ fn count_lines(path: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// 图标资源 ID（与 config.rs 中 IDI_ICON_ID 一致）
+const ICON_RESOURCE_ID: u16 = 1; // winres 默认主图标 ID
+
+/// 如果 assets/icon.ico 不存在，自动生成一个 32x32 蓝底 "e" 图标
+fn generate_icon_if_missing() {
+    if Path::new("assets/icon.ico").exists() {
+        return;
+    }
+    println!("cargo:warning=[Build] 正在生成 assets/icon.ico...");
+    fs::create_dir_all("assets").ok();
+    let ico = build_ico_bytes();
+    if fs::write("assets/icon.ico", &ico).is_ok() {
+        println!("cargo:warning=[Build] assets/icon.ico 生成成功 ({} bytes)", ico.len());
+    } else {
+        println!("cargo:warning=[Build] assets/icon.ico 写入失败");
+    }
+}
+
+/// 构建 32x32 BGRA .ico 文件字节（蓝底 #4A90E2 + 白色几何 "e" 字）
+fn build_ico_bytes() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4286);
+
+    // ── ICO Header (6 bytes) ──
+    buf.extend_from_slice(&[0, 0]);          // reserved
+    buf.extend_from_slice(&[1, 0]);          // type = ICO
+    buf.extend_from_slice(&[1, 0]);          // count = 1
+
+    // ── Directory Entry (16 bytes) ──
+    let data_offset: u32 = 6 + 16;           // header + 1 entry
+    let image_size: u32 = 40 + 32*32*4 + 128; // infoheader + pixels + mask
+    buf.push(32);  buf.push(32);             // width 32, height 32
+    buf.push(0);   buf.push(0);              // palette, reserved
+    buf.extend_from_slice(&[1, 0]);          // planes
+    buf.extend_from_slice(&[32, 0]);         // bpp = 32
+    buf.extend_from_slice(&image_size.to_le_bytes());
+    buf.extend_from_slice(&data_offset.to_le_bytes());
+
+    // ── BITMAPINFOHEADER (40 bytes) ──
+    buf.extend_from_slice(&40u32.to_le_bytes());  // biSize
+    buf.extend_from_slice(&32i32.to_le_bytes());  // biWidth
+    buf.extend_from_slice(&64i32.to_le_bytes());  // biHeight (2×32 for ICO)
+    buf.extend_from_slice(&[1, 0]);               // biPlanes
+    buf.extend_from_slice(&[32, 0]);              // biBitCount
+    buf.extend_from_slice(&0u32.to_le_bytes());   // biCompression
+    buf.extend_from_slice(&0u32.to_le_bytes());   // biSizeImage
+    buf.extend_from_slice(&0i32.to_le_bytes());   // biXPelsPerMeter
+    buf.extend_from_slice(&0i32.to_le_bytes());   // biYPelsPerMeter
+    buf.extend_from_slice(&0u32.to_le_bytes());   // biClrUsed
+    buf.extend_from_slice(&0u32.to_le_bytes());   // biClrImportant
+
+    // ── 32×32 BGRA 像素（几何 "e" 字：蓝底 + 白色环形 + 蓝缺口） ──
+    let cx: f32 = 16.0;
+    let cy: f32 = 16.0;
+    for y in 0..32 {
+        for x in 0..32 {
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            // 白色圆环（外径 11, 内径 7 的左大半部分 → 形成 "e" 形状）
+            let outer = dist <= 11.0;
+            let inner = dist <= 7.0;
+            // 右侧缺口：缺口中心在 (20, 16)
+            let gx = x as f32 - 20.0;
+            let gy = y as f32 - 16.0;
+            let gap = (gx * gx + gy * gy).sqrt() <= 5.5;
+            // 上半缺口：缺口中心在 (16, 10)
+            let hx = x as f32 - 16.0;
+            let hy = y as f32 - 24.0;
+            let top_gap = (hx * hx + hy * hy).sqrt() <= 5.0;
+
+            let is_white = outer && !inner && !gap && !top_gap;
+            // 中心填充
+            let center_fill = dist <= 7.0 && !gap && !top_gap;
+
+            let (r, g, b) = if is_white || center_fill {
+                (0xFFu8, 0xFFu8, 0xFFu8)
+            } else {
+                (0xE2u8, 0x90u8, 0x4Au8) // #4A90E2 → BGRA
+            };
+
+            buf.push(b); buf.push(g); buf.push(r); buf.push(0xFF); // BGRA
+        }
+    }
+
+    // ── AND Mask (128 bytes, 全不透明) ──
+    buf.extend_from_slice(&[0xFFu8; 128]);
+
+    buf
+}
+
 /// 使用 winres 嵌入图标资源（仅 MSVC 工具链可用）
 ///
+/// 将 assets/icon.ico 绑定到资源 ID 101。
 /// GNU 工具链时静默跳过 —— 运行时回退到 GDI 程序化图标。
 fn embed_icon() {
-    // 检查是否有 icon.ico 文件
     if !Path::new("assets/icon.ico").exists() {
         println!("cargo:warning=[Build] assets/icon.ico 不存在，跳过图标嵌入");
         return;
@@ -215,10 +307,11 @@ fn embed_icon() {
         res.set_icon("assets/icon.ico");
         res.set("InternalName", "easy2type");
         res.set("ProductName", "easy2type");
+        res.set("OriginalFilename", "easy2type.exe");
         if let Err(e) = res.compile() {
             println!("cargo:warning=[Build] winres 编译失败 (非 MSVC?): {}", e);
         } else {
-            println!("cargo:warning=[Build] 图标资源嵌入成功");
+            println!("cargo:warning=[Build] 图标资源嵌入成功 (ID={})", ICON_RESOURCE_ID);
         }
     }) {
         Ok(_) => {}

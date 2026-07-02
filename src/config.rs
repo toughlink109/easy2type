@@ -48,6 +48,9 @@ pub const CANDIDATE_LIMIT: usize = 4;
 /// 修饰键名称（"Ctrl" 或 "Alt"）
 pub const MODIFIER_KEY: &str = "Ctrl";
 
+/// 嵌入图标资源 ID（winres 默认主图标 ID = 1）
+pub const IDI_ICON_ID: u16 = 1;
+
 // ── v0.3.0 运行时配置 ──
 
 /// 应用配置（支持 config.json 覆盖）
