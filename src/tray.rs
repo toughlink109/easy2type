@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{
     TextOutW, GetDC, ReleaseDC,
     TRANSPARENT, FW_BOLD, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FF_DONTCARE,
-    CreateBitmap, PatBlt, WHITENESS,
+    CreateBitmap, PatBlt, BLACKNESS,
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NIM_MODIFY,
@@ -23,8 +23,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
     DestroyMenu, DestroyWindow, GetCursorPos, MF_STRING, MF_SEPARATOR,
     TPM_RIGHTBUTTON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_NONOTIFY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WM_DESTROY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WM_LBUTTONDBLCLK, WM_USER, WM_DESTROY,
     LoadIconW, IDI_APPLICATION, HICON, ICONINFO, CreateIconIndirect,
+    MessageBoxW, MB_OK, MB_ICONINFORMATION,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -148,6 +149,13 @@ impl TrayManager {
                 debug_log!("Tray", "左键单击 → 状态切换: {}", msg);
                 true
             }
+            WM_LBUTTONDBLCLK => {
+                debug_log!("Tray", "左键双击 → 打开设置面板");
+                if let Some(ref cb) = self.on_show_settings {
+                    cb();
+                }
+                true
+            }
             WM_RBUTTONUP => {
                 debug_log!("Tray", "右键单击 → 弹出菜单");
                 self.show_context_menu();
@@ -211,7 +219,15 @@ impl TrayManager {
                 }
             }
             IDM_ABOUT => {
-                debug_log!("Tray", "关于: easy2type v0.4.0");
+                debug_log!("Tray", "关于: easy2type");
+                unsafe {
+                    let _ = MessageBoxW(
+                        self.hwnd,
+                        w!("easy2type v0.5.0\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("关于 easy2type"),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
             }
             IDM_EXIT => {
                 debug_log!("Tray", "退出");
@@ -242,7 +258,15 @@ impl TrayManager {
                 true
             }
             IDM_ABOUT => {
-                println!("easy2type v0.4.0 - Windows 桌面英文输入辅助工具");
+                debug_log!("Tray", "关于: easy2type");
+                unsafe {
+                    let _ = MessageBoxW(
+                        self.hwnd,
+                        w!("easy2type v0.5.0\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("关于 easy2type"),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
                 true
             }
             IDM_EXIT => {
@@ -318,8 +342,8 @@ fn create_tray_icon() -> HICON {
         let mask_dc = CreateCompatibleDC(screen_dc);
         let old_mask = SelectObject(mask_dc, mask_bmp);
 
-        // PatBlt WHITENESS: 所有像素设为 1 = 不透明
-        let _ = PatBlt(mask_dc, 0, 0, 32, 32, WHITENESS);
+        // PatBlt BLACKNESS: 所有像素设为 0 = 不透明
+        let _ = PatBlt(mask_dc, 0, 0, 32, 32, BLACKNESS);
 
         SelectObject(mask_dc, old_mask);
         let _ = DeleteDC(mask_dc);

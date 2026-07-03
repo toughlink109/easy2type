@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn test_letter_typing_builds_buffer() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('E' as u32, false, false), &state);
         assert_eq!(state.get_buffer(), "e");
         process_key_event(&make_event('N' as u32, false, false), &state);
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn test_backspace_pops_buffer() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('E' as u32, false, false), &state);
         process_key_event(&make_event('N' as u32, false, false), &state);
         process_key_event(&make_event('V' as u32, false, false), &state);
@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_space_clears_buffer() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('H' as u32, false, false), &state);
         process_key_event(&make_event('I' as u32, false, false), &state);
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_empty_backspace_noop() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         let action = process_key_event(&make_event(VK_BACK, false, false), &state);
         assert_eq!(state.get_buffer(), "");
         assert_eq!(action, BufferAction::NoOp);
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_last_char_backspace_clears() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('X' as u32, false, false), &state);
         let action = process_key_event(&make_event(VK_BACK, false, false), &state);
         assert_eq!(state.get_buffer(), "");
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_period_clears_buffer() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('A' as u32, false, false), &state);
         let action = process_key_event(&make_event(VK_OEM_PERIOD, false, false), &state);
         assert_eq!(state.get_buffer(), "");

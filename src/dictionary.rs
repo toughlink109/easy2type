@@ -122,8 +122,8 @@ impl Trie {
 
     /// 模糊搜索（带编辑距离）：返回 `(单词, 权重, 编辑距离)` 三元组。
     ///
-    /// 与 `fuzzy_search` 相同的 Levenshtein + Trie 剪枝算法，
-    /// 额外返回每个匹配词与查询的实际编辑距离。
+    /// 使用 Damerau-Levenshtein (Optimal String Alignment) + Trie 剪枝算法，
+    /// 支持相邻字母颠倒（transposition）的纠错，且编辑距离计为 1。
     pub fn fuzzy_search_with_distance(
         &self,
         query: &str,
@@ -140,15 +140,16 @@ impl Trie {
         let initial_row: Vec<usize> = (0..=query_len).collect();
 
         let mut results: Vec<(String, u32, usize)> = Vec::new();
-        let mut stack: Vec<(usize, String, Vec<usize>)> = Vec::new();
+        // 存储五元组: (当前节点索引, 当前单词, 当前行, 上一行, 上一个字符)
+        let mut stack: Vec<(usize, String, Vec<usize>, Vec<usize>, char)> = Vec::new();
 
         // 从根节点的每个子节点开始搜索，避免将空串纳入匹配
         for (&ch, &child_idx) in &self.nodes[0].children {
-            let row = Self::compute_row(&initial_row, &query_chars, ch);
-            stack.push((child_idx, ch.to_string(), row));
+            let row = Self::compute_row_damerau(&initial_row, &initial_row, '\0', &query_chars, ch);
+            stack.push((child_idx, ch.to_string(), row, initial_row.clone(), ch));
         }
 
-        while let Some((node_idx, current_word, row)) = stack.pop() {
+        while let Some((node_idx, current_word, row, prev_row, last_ch)) = stack.pop() {
             let node = &self.nodes[node_idx];
 
             // 若当前行存在可行解且是单词节点 → 收录（含编辑距离）
@@ -164,10 +165,10 @@ impl Trie {
 
             // 继续向子节点扩展
             for (&ch, &child_idx) in &node.children {
-                let new_row = Self::compute_row(&row, &query_chars, ch);
+                let new_row = Self::compute_row_damerau(&row, &prev_row, last_ch, &query_chars, ch);
                 let mut next_word = current_word.clone();
                 next_word.push(ch);
-                stack.push((child_idx, next_word, new_row));
+                stack.push((child_idx, next_word, new_row, row.clone(), ch));
             }
         }
 
@@ -177,18 +178,30 @@ impl Trie {
         results
     }
 
-    /// 计算 Levenshtein DP 的下一行
+    /// 计算 Damerau-Levenshtein (Optimal String Alignment) DP 的下一行
     #[inline]
-    fn compute_row(prev_row: &[usize], query_chars: &[char], ch: char) -> Vec<usize> {
+    fn compute_row_damerau(
+        prev_row: &[usize],      // W[0..d-1] 的行
+        prev_prev_row: &[usize], // W[0..d-2] 的行
+        prev_ch: char,           // W[d-2] 字符
+        query_chars: &[char],    // 查询字符串
+        ch: char,                // W[d-1] 字符
+    ) -> Vec<usize> {
         let m = prev_row.len() - 1; // query 长度
         let mut new_row = Vec::with_capacity(prev_row.len());
-        new_row.push(prev_row[0] + 1); // row[0] = 上一行首元素 + 1（删除）
+        new_row.push(prev_row[0] + 1); // row[0] = 上一行首元素 + 1
 
         for j in 1..=m {
             let cost = if ch == query_chars[j - 1] { 0 } else { 1 };
-            let min = (new_row[j - 1] + 1) // 插入
+            let mut min = (new_row[j - 1] + 1) // 插入
                 .min(prev_row[j] + 1) // 删除
                 .min(prev_row[j - 1] + cost); // 替换
+
+            // 相邻字符颠倒 (Transposition) 检查
+            if j >= 2 && prev_ch != '\0' && ch == query_chars[j - 2] && prev_ch == query_chars[j - 1] {
+                min = min.min(prev_prev_row[j - 2] + 1);
+            }
+
             new_row.push(min);
         }
 

@@ -45,14 +45,17 @@ pub struct AppState {
     pub buffer: Mutex<String>,
     /// 当前预测词（None 表示无预测）
     pub prediction: Mutex<Option<String>>,
+    /// 运行时配置
+    pub config: Mutex<crate::config::AppConfig>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(config: crate::config::AppConfig) -> Self {
         Self {
             mode: AtomicU8::new(AppMode::Active as u8),
             buffer: Mutex::new(String::new()),
             prediction: Mutex::new(None),
+            config: Mutex::new(config),
         }
     }
 

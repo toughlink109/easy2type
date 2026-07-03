@@ -287,7 +287,7 @@ fn build_ico_bytes() -> Vec<u8> {
     }
 
     // ── AND Mask (128 bytes, 全不透明) ──
-    buf.extend_from_slice(&[0xFFu8; 128]);
+    buf.extend_from_slice(&[0x00u8; 128]);
 
     buf
 }

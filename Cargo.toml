@@ -31,7 +31,7 @@ slint = { version = "1", optional = true }
 
 [features]
 default = []
-slint-ui = ["slint"]
+slint-ui = ["slint", "slint-build"]
 
 [build-dependencies]
 slint-build = { version = "1", optional = true }

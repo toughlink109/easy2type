@@ -84,6 +84,52 @@ static G_CAPTURED_KEY: Mutex<Option<String>> = Mutex::new(None);
 /// 已捕获标志（主线程轮询后清除）
 static G_KEY_CAPTURED: AtomicBool = AtomicBool::new(false);
 
+static G_HOTKEY_CTRL: AtomicBool = AtomicBool::new(true);
+static G_HOTKEY_ALT: AtomicBool = AtomicBool::new(false);
+static G_HOTKEY_SHIFT: AtomicBool = AtomicBool::new(false);
+static G_HOTKEY_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new('T' as u32);
+
+/// 更新全局快捷键（主线程加载配置或 settings 修改配置时调用）
+pub fn update_hotkey(shortcut: &str) {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut vk = 0u32;
+
+    let parts = shortcut.split('+');
+    for part in parts {
+        let part = part.trim().to_uppercase();
+        if part == "CTRL" {
+            ctrl = true;
+        } else if part == "ALT" {
+            alt = true;
+        } else if part == "SHIFT" {
+            shift = true;
+        } else if part.len() == 1 {
+            vk = part.chars().next().unwrap() as u32;
+        } else {
+            // Handle common special keys
+            if part == "TAB" {
+                vk = VK_TAB;
+            } else if part == "SPACE" {
+                vk = VK_SPACE;
+            } else if part == "ENTER" || part == "RETURN" {
+                vk = VK_RETURN;
+            } else if part == "ESCAPE" || part == "ESC" {
+                vk = VK_ESCAPE;
+            }
+        }
+    }
+
+    if vk != 0 {
+        G_HOTKEY_CTRL.store(ctrl, Ordering::Release);
+        G_HOTKEY_ALT.store(alt, Ordering::Release);
+        G_HOTKEY_SHIFT.store(shift, Ordering::Release);
+        G_HOTKEY_VK.store(vk, Ordering::Release);
+        debug_log!("Hook", "更新快捷键为: Ctrl={}, Alt={}, Shift={}, VK={}", ctrl, alt, shift, vk);
+    }
+}
+
 // ── 数据结构 ──
 
 /// 键盘事件
@@ -226,8 +272,13 @@ unsafe extern "system" fn keyboard_hook_proc(
             }
         }
 
-        // Ctrl+T → 通过 channel 发送 ToggleMode
-        if is_key_down && ctrl_down && vk_code == 'T' as u32 {
+        // 动态配置的切换模式快捷键
+        let hk_ctrl = G_HOTKEY_CTRL.load(Ordering::Relaxed);
+        let hk_alt = G_HOTKEY_ALT.load(Ordering::Relaxed);
+        let hk_shift = G_HOTKEY_SHIFT.load(Ordering::Relaxed);
+        let hk_vk = G_HOTKEY_VK.load(Ordering::Relaxed);
+
+        if is_key_down && (ctrl_down == hk_ctrl) && (alt_down == hk_alt) && (shift_down == hk_shift) && vk_code == hk_vk {
             if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
                 let _ = tx.send(HookCommand::ToggleMode);
             }

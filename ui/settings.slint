@@ -1,4 +1,4 @@
-// easy2type v0.4.0 — 设置面板
+// easy2type v0.5.0 — 设置面板 (Slint 1.x 兼容版)
 // 视觉规范：扁平孟菲斯插画风 / 莫兰迪暖色系 / 12px 圆角
 
 import { Button, Switch, SpinBox, LineEdit } from "std-widgets.slint";
@@ -25,16 +25,192 @@ global Palette {
 }
 
 // ═══════════════════════════════════════
+// 孟菲斯几何插画组件（必须在使用前定义）
+// ═══════════════════════════════════════
+component MemphisIllustration inherits Rectangle {
+    background: transparent;
+    clip: true;
+
+    // ── 大圆（黄色主体） ──
+    Rectangle {
+        x: 220px;
+        y: 8px;
+        width: 62px;
+        height: 62px;
+        border-radius: 31px;
+        background: Palette.sun;
+        opacity: 0.85;
+    }
+
+    // ── 中型矩形-珊瑚色 ──
+    Rectangle {
+        x: 178px;
+        y: 32px;
+        width: 24px;
+        height: 38px;
+        border-radius: 6px;
+        background: Palette.coral;
+        opacity: 0.75;
+    }
+
+    Rectangle {
+        x: 265px;
+        y: 28px;
+        width: 20px;
+        height: 42px;
+        border-radius: 5px;
+        background: Palette.sky;
+        opacity: 0.7;
+    }
+
+    // ── 小圆点装饰 ──
+    Rectangle {
+        x: 195px;
+        y: 50px;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: Palette.mint;
+    }
+
+    Rectangle {
+        x: 210px;
+        y: 62px;
+        width: 6px;
+        height: 6px;
+        border-radius: 3px;
+        background: Palette.coral;
+    }
+
+    Rectangle {
+        x: 285px;
+        y: 48px;
+        width: 7px;
+        height: 7px;
+        border-radius: 3px;
+        background: Palette.blush;
+    }
+
+    Rectangle {
+        x: 300px;
+        y: 60px;
+        width: 5px;
+        height: 5px;
+        border-radius: 2px;
+        background: Palette.sun;
+    }
+
+    // ── 左侧大圆环 ──
+    Rectangle {
+        x: 60px;
+        y: 10px;
+        width: 70px;
+        height: 70px;
+        border-radius: 35px;
+        background: transparent;
+        border-width: 4px;
+        border-color: Palette.mint;
+    }
+
+    // ── 左下角方块 ──
+    Rectangle {
+        x: 80px;
+        y: 48px;
+        width: 18px;
+        height: 18px;
+        border-radius: 4px;
+        background: Palette.sky;
+    }
+
+    Rectangle {
+        x: 105px;
+        y: 55px;
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+        background: Palette.coral;
+    }
+
+    // ── 右侧半圆（纯 Rectangle，去掉不支持的 rotation-angle） ──
+    Rectangle {
+        x: 340px;
+        y: 15px;
+        width: 50px;
+        height: 25px;
+        border-top-left-radius: 25px;
+        border-top-right-radius: 25px;
+        border-bottom-left-radius: 0px;
+        border-bottom-right-radius: 0px;
+        background: Palette.blush;
+        opacity: 0.7;
+    }
+
+    // ── 底部短线（代表键盘/输入） ──
+    Rectangle {
+        x: 160px;
+        y: 72px;
+        width: 40px;
+        height: 8px;
+        border-radius: 4px;
+        background: Palette.text-secondary;
+        opacity: 0.3;
+    }
+    Rectangle {
+        x: 210px;
+        y: 72px;
+        width: 30px;
+        height: 8px;
+        border-radius: 4px;
+        background: Palette.text-secondary;
+        opacity: 0.25;
+    }
+    Rectangle {
+        x: 250px;
+        y: 72px;
+        width: 35px;
+        height: 8px;
+        border-radius: 4px;
+        background: Palette.text-secondary;
+        opacity: 0.3;
+    }
+
+    Text {
+        x: 130px;
+        y: 78px;
+        text: "type smarter";
+        font-size: 10px;
+        color: Palette.text-secondary;
+        opacity: 0.5;
+    }
+}
+
+// ═══════════════════════════════════════
 // 设置窗口主组件
 // ═══════════════════════════════════════
 export component SettingsWindow inherits Window {
     title: "easy2type";
     preferred-width: 480px;
-    preferred-height: 420px;
+    preferred-height: 460px;
     min-width: 420px;
-    min-height: 380px;
-    borderless: true;
+    min-height: 400px;
     no-frame: true;
+
+    // ══ 属性（Rust 端绑定） ══
+    in-out property <bool> active: true;
+    in-out property <string> toggle-shortcut: "Ctrl+T";
+    in-out property <string> complete-shortcut: "Tab";
+    in-out property <int> candidate-limit: 4;
+
+    // ══ 回调 → Rust 端处理 ══
+    callback toggle-active(bool);
+    callback edit-toggle-shortcut(string);
+    callback edit-complete-shortcut(string);
+    callback edit-candidate-limit(int);
+    callback window-hide();
+
+    // ══ Rust → UI 通知 ══
+    callback notify-saved(string);
+    callback notify-error(string);
 
     // ══ 背景层（大圆角白色底） ══
     Rectangle {
@@ -46,7 +222,7 @@ export component SettingsWindow inherits Window {
         border-color: Palette.border;
 
         VerticalLayout {
-            padding: 0;
+            padding: 0px;
 
             // ── 标题栏（拖拽区域） ──
             Rectangle {
@@ -56,6 +232,8 @@ export component SettingsWindow inherits Window {
                 HorizontalLayout {
                     padding-left: 20px;
                     padding-right: 12px;
+                    padding-top: 0px;
+                    padding-bottom: 0px;
 
                     // 标题
                     Text {
@@ -77,13 +255,13 @@ export component SettingsWindow inherits Window {
                         height: 32px;
                         border-radius: 8px;
                         background: transparent;
-                        touch-area := TouchArea {
+                        close-touch := TouchArea {
                             clicked => {
                                 root.window-hide();
                             }
                         }
                         states [
-                            hovered when touch-area.has-hover: {
+                            hovered when close-touch.has-hover: {
                                 background: #E8E8E8;
                             }
                         ]
@@ -98,9 +276,12 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            // ── 滚动内容区 ──
+            // ── 主内容区 ──
             VerticalLayout {
-                padding: 0 20px 20px 20px;
+                padding-top: 0px;
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-bottom: 20px;
                 spacing: 14px;
 
                 // ═══════════════════════════
@@ -196,13 +377,13 @@ export component SettingsWindow inherits Window {
                                 height: 28px;
                                 border-radius: 6px;
                                 background: Palette.accent;
-                                touch-area := TouchArea {
+                                save-toggle-touch := TouchArea {
                                     clicked => {
                                         root.edit-toggle-shortcut(toggle-field.text);
                                     }
                                 }
                                 states [
-                                    hovered when touch-area.has-hover: {
+                                    hovered when save-toggle-touch.has-hover: {
                                         background: Palette.accent-hover;
                                     }
                                 ]
@@ -243,13 +424,13 @@ export component SettingsWindow inherits Window {
                                 height: 28px;
                                 border-radius: 6px;
                                 background: Palette.accent;
-                                touch-area := TouchArea {
+                                save-complete-touch := TouchArea {
                                     clicked => {
                                         root.edit-complete-shortcut(complete-field.text);
                                     }
                                 }
                                 states [
-                                    hovered when touch-area.has-hover: {
+                                    hovered when save-complete-touch.has-hover: {
                                         background: Palette.accent-hover;
                                     }
                                 ]
@@ -306,183 +487,5 @@ export component SettingsWindow inherits Window {
                 }
             }
         }
-    }
-
-    // ══ 属性（Rust 端绑定） ══
-    in-out property <bool> active: true;
-    in-out property <string> toggle-shortcut: "Ctrl+T";
-    in-out property <string> complete-shortcut: "Tab";
-    in-out property <int> candidate-limit: 4;
-
-    // ══ 回调 → Rust 端处理 ══
-    callback toggle-active(bool);
-    callback edit-toggle-shortcut(string);
-    callback edit-complete-shortcut(string);
-    callback edit-candidate-limit(int);
-    callback window-hide();
-
-    // ══ Rust → UI 通知 ══
-    callback notify-saved(string);
-    callback notify-error(string);
-}
-
-// ═══════════════════════════════════════
-// 孟菲斯几何插画组件
-// ═══════════════════════════════════════
-component MemphisIllustration inherits Rectangle {
-    background: transparent;
-    clip: true;
-
-    // ── 大圆（头部/灯泡） ──
-    Rectangle {
-        x: 220px;
-        y: 8px;
-        width: 62px;
-        height: 62px;
-        border-radius: 50%;
-        background: Palette.sun;
-        opacity: 0.85;
-    }
-
-    // ── 中型歪矩形 — 代表打字效率 ──
-    Rectangle {
-        x: 178px;
-        y: 32px;
-        width: 24px;
-        height: 38px;
-        border-radius: 6px;
-        background: Palette.coral;
-        rotation-angle: 15deg;
-        opacity: 0.75;
-    }
-
-    Rectangle {
-        x: 265px;
-        y: 28px;
-        width: 20px;
-        height: 42px;
-        border-radius: 5px;
-        background: Palette.sky;
-        rotation-angle: -10deg;
-        opacity: 0.7;
-    }
-
-    // ── 小圆点装饰（代表文字/字符） ──
-    Rectangle {
-        x: 195px;
-        y: 50px;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: Palette.mint;
-    }
-
-    Rectangle {
-        x: 210px;
-        y: 62px;
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: Palette.coral;
-    }
-
-    Rectangle {
-        x: 285px;
-        y: 48px;
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: Palette.blush;
-    }
-
-    Rectangle {
-        x: 300px;
-        y: 60px;
-        width: 5px;
-        height: 5px;
-        border-radius: 50%;
-        background: Palette.sun;
-    }
-
-    // ── 左侧大弧形（孟菲斯典型元素） ──
-    Rectangle {
-        x: 60px;
-        y: 10px;
-        width: 70px;
-        height: 70px;
-        border-radius: 50%;
-        background: transparent;
-        border-width: 4px;
-        border-color: Palette.mint;
-    }
-
-    // ── 左下角方块 ──
-    Rectangle {
-        x: 80px;
-        y: 48px;
-        width: 18px;
-        height: 18px;
-        border-radius: 4px;
-        background: Palette.sky;
-        rotation-angle: 30deg;
-    }
-
-    Rectangle {
-        x: 105px;
-        y: 55px;
-        width: 12px;
-        height: 12px;
-        border-radius: 3px;
-        background: Palette.coral;
-        rotation-angle: -25deg;
-    }
-
-    // ── 右侧半圆 ──
-    Rectangle {
-        x: 340px;
-        y: 15px;
-        width: 50px;
-        height: 25px;
-        border-radius: 25px 25px 0 0;
-        background: Palette.blush;
-        opacity: 0.7;
-    }
-
-    // ── 底部短线（代表键盘/输入） ──
-    Rectangle {
-        x: 160px;
-        y: 72px;
-        width: 40px;
-        height: 8px;
-        border-radius: 4px;
-        background: Palette.text-secondary;
-        opacity: 0.3;
-    }
-    Rectangle {
-        x: 210px;
-        y: 72px;
-        width: 30px;
-        height: 8px;
-        border-radius: 4px;
-        background: Palette.text-secondary;
-        opacity: 0.25;
-    }
-    Rectangle {
-        x: 250px;
-        y: 72px;
-        width: 35px;
-        height: 8px;
-        border-radius: 4px;
-        background: Palette.text-secondary;
-        opacity: 0.3;
-    }
-
-    Text {
-        x: 130px;
-        y: 78px;
-        text: "type smarter";
-        font-size: 10px;
-        color: Palette.text-secondary;
-        opacity: 0.5;
     }
 }

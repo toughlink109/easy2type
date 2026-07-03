@@ -44,13 +44,7 @@ static mut G_APP_STATE: Option<Arc<AppState>> = None;
 static mut G_TRAY_MANAGER: Option<tray::TrayManager> = None;
 static mut G_OVERLAY: Option<overlay::Overlay> = None;
 
-/// 设置面板显示请求（v0.4.0: 预留 Slint 集成）
-static G_SHOW_SETTINGS: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
-pub fn request_show_settings() {
-    G_SHOW_SETTINGS.store(true, std::sync::atomic::Ordering::Release);
-}
 
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -135,7 +129,6 @@ unsafe fn run_event_loop(
     hook_stop: Arc<std::sync::atomic::AtomicBool>,
     app_state: Arc<AppState>,
     predictor: predictor::Predictor,
-    candidate_limit: usize,
 ) {
     debug_log!("Main", "事件循环开始 tid={:?} Slint={}",
         std::thread::current().id(),
@@ -153,21 +146,6 @@ unsafe fn run_event_loop(
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
-        }
-
-        // 2. 设置面板请求 (v0.4.0)
-        if G_SHOW_SETTINGS.swap(false, std::sync::atomic::Ordering::AcqRel) {
-            debug_log!("Main", "G_SHOW_SETTINGS 触发, Slint={}",
-                if cfg!(feature = "slint-ui") { "已编译" } else { "未编译" });
-            #[cfg(feature = "slint-ui")]
-            {
-                debug_log!("Main", "调用 Slint show_window()");
-                crate::settings::show_window();
-            }
-            #[cfg(not(feature = "slint-ui"))]
-            {
-                debug_log!("Main", "Slint 未编译 — 设置面板不可用");
-            }
         }
 
         // 2c. 快捷键捕获轮询 (v0.4.0)
@@ -280,9 +258,10 @@ unsafe fn run_event_loop(
                         BufferAction::UpdatePrediction => {
                             let buf = app_state.get_buffer();
                             if !buf.is_empty() {
+                                let limit = app_state.config.lock().unwrap().candidate_limit;
                                 let candidates = predictor.suggest_top_n(
                                     &buf,
-                                    candidate_limit,
+                                    limit,
                                 );
 
                                 if !candidates.is_empty() {
@@ -329,7 +308,6 @@ unsafe fn run_event_loop(
                         BufferAction::NoOp => {}
                     }
                 }
-                Ok(hook::HookCommand::ToggleMode) => {}
                 Err(crossbeam::channel::TryRecvError::Empty) => break,
                 Err(crossbeam::channel::TryRecvError::Disconnected) => {
                     debug_log!("Main", "[Main] 钩子 channel 断开");
@@ -354,10 +332,12 @@ fn main() {
     debug_log!("Main", "COM 初始化完成");
 
     let app_config = config::AppConfig::load("config.json");
-    let candidate_limit = app_config.candidate_limit;
-    debug_log!("Main", "配置加载: candidates={}", candidate_limit);
+    debug_log!("Main", "配置加载: candidates={}", app_config.candidate_limit);
 
-    let app_state = Arc::new(AppState::new());
+    // 初始化钩子快捷键
+    hook::update_hotkey(&app_config.toggle_shortcut);
+
+    let app_state = Arc::new(AppState::new(app_config));
     let trie = dictionary::load_dictionary();
     let word_count = trie.word_count();
     let predictor = predictor::Predictor::new(trie);
@@ -386,16 +366,17 @@ fn main() {
         debug_log!("Main", "托盘图标已创建");
 
         // 注册设置面板回调
-        tray_mgr.on_show_settings = Some(Box::new(|| {
+        let app_state_clone = app_state.clone();
+        tray_mgr.on_show_settings = Some(Box::new(move || {
             debug_log!("Tray", "触发设置面板请求");
-            request_show_settings();
+            crate::settings::show_window(app_state_clone.clone());
         }));
 
         G_TRAY_MANAGER = Some(tray_mgr);
         G_OVERLAY = Some(overlay);
 
         debug_log!("Main", "进入主事件循环");
-        run_event_loop(hook_rx, hook_stop, app_state, predictor, candidate_limit);
+        run_event_loop(hook_rx, hook_stop, app_state, predictor);
 
         debug_log!("Main", "主循环退出, 等待钩子线程...");
         let _ = hook_handle.join();

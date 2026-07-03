@@ -193,12 +193,12 @@ mod tests {
 
         let pred = Predictor::new(trie);
 
-        // "teh" → "the" (字母颠倒，编辑距离 2)
+        // "teh" → "the" (字母颠倒，编辑距离为 1，在 Damerau-Levenshtein 算法下)
         let result = pred.suggest("teh");
         assert!(result.is_some());
         let (word, dist) = result.unwrap();
         assert_eq!(word, "the", "\"teh\" 应纠正为 \"the\"");
-        assert_eq!(dist, 2, "teh→the 需要交换两个字符，编辑距离为 2");
+        assert_eq!(dist, 1, "teh→the 需要交换两个字符，在 Damerau-Levenshtein 算法下编辑距离为 1");
     }
 
     #[test]
