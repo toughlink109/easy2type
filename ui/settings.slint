@@ -1,7 +1,7 @@
-// easy2type v0.5.0 — 设置面板 (Slint 1.x 兼容版)
+// easy2type v0.6.0 — 设置面板（左侧导航 + 右分控卡片）
 // 视觉规范：扁平孟菲斯插画风 / 莫兰迪暖色系 / 12px 圆角
 
-import { Button, Switch, SpinBox, LineEdit } from "std-widgets.slint";
+import { Button, Switch, SpinBox, ComboBox } from "std-widgets.slint";
 
 // ═══════════════════════════════════════
 // 全局配色 & 常量
@@ -15,6 +15,7 @@ global Palette {
     out property <color> text-secondary: #7F8C8D;
     out property <color> success: #27AE60;
     out property <color> border: #E8ECF0;
+    out property <color> warn-bg: #FFF8E1;      // 录制态背景淡黄
 
     // Corporate Memphis 插画色板
     out property <color> coral: #FF6B6B;
@@ -131,7 +132,7 @@ component MemphisIllustration inherits Rectangle {
         background: Palette.coral;
     }
 
-    // ── 右侧半圆（纯 Rectangle，去掉不支持的 rotation-angle） ──
+    // ── 右侧半圆 ──
     Rectangle {
         x: 340px;
         y: 15px;
@@ -185,14 +186,79 @@ component MemphisIllustration inherits Rectangle {
 }
 
 // ═══════════════════════════════════════
+// 自定义复选框（纯 Slint 绘制）
+// ═══════════════════════════════════════
+component CheckBox inherits Rectangle {
+    in-out property <bool> checked: false;
+    callback toggled(bool);
+
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    border-width: 2px;
+    border-color: root.checked ? Palette.accent : Palette.border;
+    background: root.checked ? Palette.accent : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled(root.checked);
+        }
+    }
+
+    if root.checked: Text {
+        text: "✓";
+        color: white;
+        font-size: 12px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// ═══════════════════════════════════════
+// 左侧导航项
+// ═══════════════════════════════════════
+component NavItem inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> selected: false;
+    callback clicked;
+
+    height: 52px;
+    border-radius: 12px;
+    background: root.selected ? Palette.accent : transparent;
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        font-size: 13px;
+        font-weight: root.selected ? 700 : 400;
+        color: root.selected ? white : Palette.text-primary;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+    }
+
+    states [
+        hovered when touch.has-hover && !root.selected : { background: Palette.border; }
+    ]
+}
+
+// ═══════════════════════════════════════
 // 设置窗口主组件
 // ═══════════════════════════════════════
 export component SettingsWindow inherits Window {
     title: "easy2type";
-    preferred-width: 480px;
-    preferred-height: 460px;
-    min-width: 420px;
-    min-height: 400px;
+    preferred-width: 600px;
+    preferred-height: 480px;
+    min-width: 560px;
+    min-height: 440px;
     no-frame: true;
 
     // ══ 属性（Rust 端绑定） ══
@@ -201,18 +267,49 @@ export component SettingsWindow inherits Window {
     in-out property <string> complete-shortcut: "Tab";
     in-out property <int> candidate-limit: 4;
 
+    // v0.6.0 — 导航
+    in-out property <int> current-section: 0;
+
+    // v0.6.0 — 快捷键录制状态
+    in-out property <bool> toggle-recording: false;
+    in-out property <bool> complete-recording: false;
+
+    // v0.6.0 — 智能黑名单
+    in-out property <bool> filter-digits: false;
+    in-out property <bool> filter-urls: false;
+
+    // v0.6.0 — 词库管理
+    in-out property <string> current-dictionary: "通用高频词库";
+
     // ══ 回调 → Rust 端处理 ══
     callback toggle-active(bool);
-    callback edit-toggle-shortcut(string);
-    callback edit-complete-shortcut(string);
+
+    // 快捷键录制
+    callback start-record-toggle-shortcut();
+    callback start-record-complete-shortcut();
+    callback cancel-recording();
+
+    // 候选词数量
     callback edit-candidate-limit(int);
+
+    // 智能黑名单
+    callback toggle-filter-digits(bool);
+    callback toggle-filter-urls(bool);
+
+    // 词库管理
+    callback switch-dictionary(string);
+
+    // 窗口控制
+    callback start-drag();
     callback window-hide();
 
-    // ══ Rust → UI 通知 ══
+    // 通知（Rust → UI）
     callback notify-saved(string);
     callback notify-error(string);
 
-    // ══ 背景层（大圆角白色底） ══
+    // ═════════════════════════════════
+    // 根容器
+    // ═════════════════════════════════
     Rectangle {
         width: 100%;
         height: 100%;
@@ -223,11 +320,20 @@ export component SettingsWindow inherits Window {
 
         VerticalLayout {
             padding: 0px;
+            spacing: 0px;
 
             // ── 标题栏（拖拽区域） ──
             Rectangle {
                 height: 44px;
                 background: transparent;
+
+                drag-area := TouchArea {
+                    moved => {
+                        if (drag-area.pressed) {
+                            root.start-drag();
+                        }
+                    }
+                }
 
                 HorizontalLayout {
                     padding-left: 20px;
@@ -235,7 +341,6 @@ export component SettingsWindow inherits Window {
                     padding-top: 0px;
                     padding-bottom: 0px;
 
-                    // 标题
                     Text {
                         text: "easy2type";
                         font-size: 15px;
@@ -244,10 +349,7 @@ export component SettingsWindow inherits Window {
                         vertical-alignment: center;
                     }
 
-                    // 弹簧
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
+                    Rectangle { horizontal-stretch: 1; }
 
                     // 关闭按钮
                     Rectangle {
@@ -256,14 +358,10 @@ export component SettingsWindow inherits Window {
                         border-radius: 8px;
                         background: transparent;
                         close-touch := TouchArea {
-                            clicked => {
-                                root.window-hide();
-                            }
+                            clicked => { root.window-hide(); }
                         }
                         states [
-                            hovered when close-touch.has-hover: {
-                                background: #E8E8E8;
-                            }
+                            hovered when close-touch.has-hover : { background: #E8E8E8; }
                         ]
                         Text {
                             text: "✕";
@@ -276,211 +374,444 @@ export component SettingsWindow inherits Window {
                 }
             }
 
-            // ── 主内容区 ──
-            VerticalLayout {
-                padding-top: 0px;
-                padding-left: 20px;
-                padding-right: 20px;
-                padding-bottom: 20px;
-                spacing: 14px;
+            // ── 分割线 ──
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+                horizontal-stretch: 1;
+            }
 
-                // ═══════════════════════════
-                // 1. 孟菲斯几何插画
-                // ═══════════════════════════
-                MemphisIllustration {
-                    min-height: 90px;
-                    max-height: 90px;
-                }
+            // ═════════════════════════
+            // 主体：左导航 + 右面板
+            // ═════════════════════════
+            HorizontalLayout {
+                spacing: 0px;
+                vertical-stretch: 1;
 
-                // ═══════════════════════════
-                // 2. 卡片：全局开关
-                // ═══════════════════════════
+                // ═══ 左侧导航栏 ═══
                 Rectangle {
+                    width: 64px;
                     background: Palette.card;
-                    border-radius: 12px;
-                    border-width: 1px;
-                    border-color: Palette.border;
 
-                    HorizontalLayout {
-                        padding: 16px;
+                    VerticalLayout {
+                        padding-top: 16px;
+                        spacing: 4px;
 
-                        VerticalLayout {
-                            spacing: 2px;
-                            horizontal-stretch: 1;
-
-                            Text {
-                                text: "单词联想";
-                                font-size: 14px;
-                                font-weight: 600;
-                                color: Palette.text-primary;
-                            }
-                            Text {
-                                text: "开启后实时显示预测与纠错";
-                                font-size: 11px;
-                                color: Palette.text-secondary;
-                            }
+                        NavItem {
+                            label: "通用";
+                            selected: current-section == 0;
+                            clicked => { current-section = 0; }
                         }
-
-                        sw := Switch {
-                            checked: root.active;
-                            toggled => {
-                                root.toggle-active(sw.checked);
-                            }
+                        NavItem {
+                            label: "过滤";
+                            selected: current-section == 1;
+                            clicked => { current-section = 1; }
+                        }
+                        NavItem {
+                            label: "词库";
+                            selected: current-section == 2;
+                            clicked => { current-section = 2; }
                         }
                     }
                 }
 
-                // ═══════════════════════════
-                // 3. 卡片：快捷键绑定
-                // ═══════════════════════════
+                // ── 竖分割线 ──
                 Rectangle {
-                    background: Palette.card;
-                    border-radius: 12px;
-                    border-width: 1px;
-                    border-color: Palette.border;
+                    width: 1px;
+                    background: Palette.border;
+                }
 
-                    VerticalLayout {
+                // ═══ 右侧内容面板 ═══
+                Rectangle {
+                    horizontal-stretch: 1;
+                    vertical-stretch: 1;
+                    background: Palette.bg;
+
+                    // ────────── 页 0：通用设置 ──────────
+                    if current-section == 0: VerticalLayout {
                         padding: 16px;
-                        spacing: 10px;
+                        spacing: 12px;
 
+                        // 插画
+                        MemphisIllustration { height: 80px; }
+
+                        // 卡片：单词联想开关
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            HorizontalLayout {
+                                padding: 14px;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: "单词联想";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: Palette.text-primary;
+                                    }
+                                    Text {
+                                        text: "开启后实时显示预测与纠错";
+                                        font-size: 11px;
+                                        color: Palette.text-secondary;
+                                    }
+                                }
+                                sw := Switch {
+                                    checked: root.active;
+                                    toggled => {
+                                        root.toggle-active(sw.checked);
+                                    }
+                                }
+                            }
+                        }
+
+                        // 卡片：快捷键绑定（即按即录）
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            // ⭐ 录制态蓝色高亮边框
+                            border-color: (root.toggle-recording || root.complete-recording) ? Palette.accent : Palette.border;
+
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+
+                                Text {
+                                    text: "快捷键绑定";
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: Palette.text-primary;
+                                }
+
+                                // ── 切换开关 ──
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "切换开关";
+                                        font-size: 12px;
+                                        color: Palette.text-primary;
+                                        min-width: 70px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    // 常态：显示快捷键
+                                    if !root.toggle-recording: Rectangle {
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Palette.border;
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        Text {
+                                            text: root.toggle-shortcut;
+                                            font-size: 12px;
+                                            color: Palette.text-primary;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    // 录制态：等待按键
+                                    if root.toggle-recording: Rectangle {
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Palette.accent;
+                                        background: Palette.warn-bg;
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        Text {
+                                            text: "⏳ 请按下快捷键...";
+                                            font-size: 12px;
+                                            color: Palette.accent;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    // 修改 / 取消按钮
+                                    Rectangle {
+                                        width: 50px;
+                                        height: 28px;
+                                        border-radius: 6px;
+                                        background: root.toggle-recording ? Palette.coral : Palette.accent;
+                                        btn-toggle := TouchArea {
+                                            clicked => {
+                                                if root.toggle-recording {
+                                                    root.toggle-recording = false;
+                                                    root.cancel-recording();
+                                                } else {
+                                                    root.start-record-toggle-shortcut();
+                                                }
+                                            }
+                                        }
+                                        states [
+                                            hovered when btn-toggle.has-hover : { opacity: 0.85; }
+                                        ]
+                                        Text {
+                                            text: root.toggle-recording ? "取消" : "修改";
+                                            font-size: 11px;
+                                            color: white;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                // ── 补全快捷键 ──
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: center;
+
+                                    Text {
+                                        text: "补全快捷键";
+                                        font-size: 12px;
+                                        color: Palette.text-primary;
+                                        min-width: 70px;
+                                        vertical-alignment: center;
+                                    }
+
+                                    // 常态
+                                    if !root.complete-recording: Rectangle {
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Palette.border;
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        Text {
+                                            text: root.complete-shortcut;
+                                            font-size: 12px;
+                                            color: Palette.text-primary;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+
+                                    // 录制态
+                                    if root.complete-recording: Rectangle {
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: Palette.accent;
+                                        background: Palette.warn-bg;
+                                        horizontal-stretch: 1;
+                                        height: 30px;
+                                        Text {
+                                            text: "⏳ 请按下快捷键...";
+                                            font-size: 12px;
+                                            color: Palette.accent;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        width: 50px;
+                                        height: 28px;
+                                        border-radius: 6px;
+                                        background: root.complete-recording ? Palette.coral : Palette.accent;
+                                        btn-complete := TouchArea {
+                                            clicked => {
+                                                if root.complete-recording {
+                                                    root.complete-recording = false;
+                                                    root.cancel-recording();
+                                                } else {
+                                                    root.start-record-complete-shortcut();
+                                                }
+                                            }
+                                        }
+                                        states [
+                                            hovered when btn-complete.has-hover : { opacity: 0.85; }
+                                        ]
+                                        Text {
+                                            text: root.complete-recording ? "取消" : "修改";
+                                            font-size: 11px;
+                                            color: white;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 卡片：候选词数量
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            HorizontalLayout {
+                                padding: 14px;
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: "候选词数量";
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        color: Palette.text-primary;
+                                    }
+                                    Text {
+                                        text: "OSD 悬浮窗最多显示的候选词数 (4~9)";
+                                        font-size: 11px;
+                                        color: Palette.text-secondary;
+                                    }
+                                }
+                                spin := SpinBox {
+                                    minimum: 4;
+                                    maximum: 9;
+                                    value: root.candidate-limit;
+                                    edited(value) => {
+                                        root.edit-candidate-limit(value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ────────── 页 1：智能黑名单 ──────────
+                    if current-section == 1: VerticalLayout {
+                        padding: 16px;
+                        spacing: 12px;
+
+                        // 页标题
                         Text {
-                            text: "快捷键绑定";
-                            font-size: 13px;
+                            text: "智能黑名单";
+                            font-size: 16px;
                             font-weight: 600;
                             color: Palette.text-primary;
                         }
+                        Text {
+                            text: "配置输入过滤规则，避免联想干扰";
+                            font-size: 11px;
+                            color: Palette.text-secondary;
+                        }
 
-                        // 切换开关快捷键
-                        HorizontalLayout {
-                            spacing: 12px;
+                        // 卡片：忽略数字
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            HorizontalLayout {
+                                padding: 14px;
+                                spacing: 10px;
 
-                            Text {
-                                text: "切换开关";
-                                font-size: 12px;
-                                color: Palette.text-primary;
-                                vertical-alignment: center;
-                                min-width: 80px;
-                            }
-
-                            toggle-field := LineEdit {
-                                text: root.toggle-shortcut;
-                                placeholder-text: "Ctrl+T";
-                                enabled: true;
-                                horizontal-stretch: 1;
-                                accepted(text) => {
-                                    root.edit-toggle-shortcut(text);
-                                }
-                            }
-
-                            Rectangle {
-                                width: 60px;
-                                height: 28px;
-                                border-radius: 6px;
-                                background: Palette.accent;
-                                save-toggle-touch := TouchArea {
-                                    clicked => {
-                                        root.edit-toggle-shortcut(toggle-field.text);
+                                CheckBox {
+                                    checked: root.filter-digits;
+                                    toggled(checked) => {
+                                        root.toggle-filter-digits(checked);
                                     }
                                 }
-                                states [
-                                    hovered when save-toggle-touch.has-hover: {
-                                        background: Palette.accent-hover;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: "忽略包含数字的文本";
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        color: Palette.text-primary;
                                     }
-                                ]
-                                Text {
-                                    text: "保存";
-                                    font-size: 11px;
-                                    color: #FFFFFF;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                    Text {
+                                        text: "如 \"win10\", \"v2ex\" 等混合输入";
+                                        font-size: 11px;
+                                        color: Palette.text-secondary;
+                                    }
                                 }
                             }
                         }
 
-                        // 补全快捷键
-                        HorizontalLayout {
-                            spacing: 12px;
+                        // 卡片：忽略网址
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            HorizontalLayout {
+                                padding: 14px;
+                                spacing: 10px;
 
-                            Text {
-                                text: "补全快捷键";
-                                font-size: 12px;
-                                color: Palette.text-primary;
-                                vertical-alignment: center;
-                                min-width: 80px;
-                            }
-
-                            complete-field := LineEdit {
-                                text: root.complete-shortcut;
-                                placeholder-text: "Tab";
-                                enabled: true;
-                                horizontal-stretch: 1;
-                                accepted(text) => {
-                                    root.edit-complete-shortcut(text);
-                                }
-                            }
-
-                            Rectangle {
-                                width: 60px;
-                                height: 28px;
-                                border-radius: 6px;
-                                background: Palette.accent;
-                                save-complete-touch := TouchArea {
-                                    clicked => {
-                                        root.edit-complete-shortcut(complete-field.text);
+                                CheckBox {
+                                    checked: root.filter-urls;
+                                    toggled(checked) => {
+                                        root.toggle-filter-urls(checked);
                                     }
                                 }
-                                states [
-                                    hovered when save-complete-touch.has-hover: {
-                                        background: Palette.accent-hover;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: "忽略网址与路径";
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        color: Palette.text-primary;
                                     }
-                                ]
-                                Text {
-                                    text: "保存";
-                                    font-size: 11px;
-                                    color: #FFFFFF;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                                    Text {
+                                        text: "如 https://www、C:\\path 等";
+                                        font-size: 11px;
+                                        color: Palette.text-secondary;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // ═══════════════════════════
-                // 4. 卡片：候选词数量
-                // ═══════════════════════════
-                Rectangle {
-                    background: Palette.card;
-                    border-radius: 12px;
-                    border-width: 1px;
-                    border-color: Palette.border;
-
-                    HorizontalLayout {
+                    // ────────── 页 2：词库管理 ──────────
+                    if current-section == 2: VerticalLayout {
                         padding: 16px;
+                        spacing: 12px;
 
-                        VerticalLayout {
-                            spacing: 2px;
-                            horizontal-stretch: 1;
-
-                            Text {
-                                text: "候选词数量";
-                                font-size: 14px;
-                                font-weight: 600;
-                                color: Palette.text-primary;
-                            }
-                            Text {
-                                text: "OSD 悬浮窗最多显示的候选词数 (4~9)";
-                                font-size: 11px;
-                                color: Palette.text-secondary;
-                            }
+                        // 页标题
+                        Text {
+                            text: "词库管理";
+                            font-size: 16px;
+                            font-weight: 600;
+                            color: Palette.text-primary;
+                        }
+                        Text {
+                            text: "选择输入联想使用的词库文件";
+                            font-size: 11px;
+                            color: Palette.text-secondary;
                         }
 
-                        spin := SpinBox {
-                            minimum: 4;
-                            maximum: 9;
-                            value: root.candidate-limit;
-                            edited(value) => {
-                                root.edit-candidate-limit(value);
+                        // 卡片
+                        Rectangle {
+                            background: Palette.card;
+                            border-radius: 12px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            VerticalLayout {
+                                padding: 16px;
+                                spacing: 12px;
+
+                                Text {
+                                    text: "当前词库";
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: Palette.text-primary;
+                                }
+
+                                cb := ComboBox {
+                                    current-value: root.current-dictionary;
+                                    model: ["通用高频词库", "计算机技术词库"];
+                                    selected(text) => {
+                                        root.current-dictionary = text;
+                                        root.switch-dictionary(text);
+                                    }
+                                }
+
+                                Text {
+                                    text: "切换词库需重启应用后生效";
+                                    font-size: 10px;
+                                    color: Palette.text-secondary;
+                                }
                             }
                         }
                     }

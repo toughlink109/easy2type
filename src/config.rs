@@ -64,6 +64,14 @@ pub struct AppConfig {
     pub candidate_limit: usize,
     /// 候选选择修饰键，"Ctrl" 或 "Alt"
     pub modifier_key: String,
+    // ── v0.6.0 智能黑名单 ──
+    /// 忽略包含数字的文本
+    pub filter_digits: bool,
+    /// 忽略网址与路径
+    pub filter_urls: bool,
+    // ── v0.6.0 词库管理 ──
+    /// 当前词库名称
+    pub dictionary_name: String,
 }
 
 impl Default for AppConfig {
@@ -73,6 +81,9 @@ impl Default for AppConfig {
             complete_shortcut: "Tab".to_string(),
             candidate_limit: 4,
             modifier_key: "Ctrl".to_string(),
+            filter_digits: false,
+            filter_urls: false,
+            dictionary_name: "通用高频词库".to_string(),
         }
     }
 }
@@ -105,6 +116,22 @@ fn extract_json_number(json: &str, key: &str) -> Option<usize> {
     digits.parse().ok()
 }
 
+/// 从 JSON 字符串中提取指定键的布尔值
+fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
+    let search = format!("\"{}\"", key);
+    let pos = json.find(&search)?;
+    let rest = &json[pos + search.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 impl AppConfig {
     /// 从 JSON 文件加载配置，文件不存在或格式错误时返回默认值
     pub fn load(path: &str) -> Self {
@@ -131,6 +158,18 @@ impl AppConfig {
             cfg.candidate_limit = v.clamp(4, 7);
         }
 
+        // v0.6.0 黑名单
+        if let Some(v) = extract_json_bool(&content, "filter_digits") {
+            cfg.filter_digits = v;
+        }
+        if let Some(v) = extract_json_bool(&content, "filter_urls") {
+            cfg.filter_urls = v;
+        }
+        // v0.6.0 词库
+        if let Some(v) = extract_json_string(&content, "dictionary_name") {
+            cfg.dictionary_name = v;
+        }
+
         println!("[Config] 配置已加载: {:?}", cfg);
         cfg
     }
@@ -138,11 +177,14 @@ impl AppConfig {
     /// 将配置保存为 JSON 文件
     pub fn save(&self, path: &str) -> std::io::Result<()> {
         let json = format!(
-            "{{\n    \"toggle_shortcut\": \"{}\",\n    \"complete_shortcut\": \"{}\",\n    \"candidate_limit\": {},\n    \"modifier_key\": \"{}\"\n}}\n",
+            "{{\n    \"toggle_shortcut\": \"{}\",\n    \"complete_shortcut\": \"{}\",\n    \"candidate_limit\": {},\n    \"modifier_key\": \"{}\",\n    \"filter_digits\": {},\n    \"filter_urls\": {},\n    \"dictionary_name\": \"{}\"\n}}\n",
             self.toggle_shortcut,
             self.complete_shortcut,
             self.candidate_limit,
             self.modifier_key,
+            self.filter_digits,
+            self.filter_urls,
+            self.dictionary_name,
         );
         std::fs::write(path, json)?;
         println!("[Config] 配置已保存到 {}", path);

@@ -260,16 +260,19 @@ unsafe extern "system" fn keyboard_hook_proc(
             return LRESULT(1);
         }
 
-        // ── 快捷键捕获模式 ──
+        // ── 快捷键捕获模式（全键盘状态机） ──
         if G_KEY_CAPTURE_MODE.load(Ordering::Acquire) {
-            if is_key_down && (ctrl_down || alt_down) && is_letter_key(vk_code) {
-                let letter = (vk_code - 'A' as u32) as u8 + b'A';
-                let combo = format_key_combo(ctrl_down, alt_down, shift_down, letter as char);
-                *G_CAPTURED_KEY.lock().unwrap() = Some(combo);
-                G_KEY_CAPTURED.store(true, Ordering::Release);
-                G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
-                return LRESULT(1);
+            // 修饰键（Ctrl/Alt/Shift/Win）只更新状态，【不结束】录制
+            // 非修饰键按下 → 构造组合键字符串 → 结束录制
+            if is_key_down && !is_modifier_key(vk_code) {
+                if let Some(combo) = format_captured_key(vk_code) {
+                    *G_CAPTURED_KEY.lock().unwrap() = Some(combo);
+                    G_KEY_CAPTURED.store(true, Ordering::Release);
+                    G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
+                }
             }
+            // 无论 KEYDOWN / KEYUP，一律吞掉输入，防止注入焦点文本框
+            return LRESULT(1);
         }
 
         // 动态配置的切换模式快捷键
@@ -413,16 +416,92 @@ pub fn vk_to_char(vk_code: u32, shift_down: bool) -> Option<char> {
     }
 }
 
-// ── v0.4.0 快捷键捕获 ──
+// ── v0.6.0 快捷键全键盘捕获 ──
 
-/// 格式化组合键字符串（如 "Ctrl+Shift+T"）
-fn format_key_combo(ctrl: bool, alt: bool, shift: bool, key: char) -> String {
+/// 判断是否为修饰键（按住时不结束录制）
+pub fn is_modifier_key(vk_code: u32) -> bool {
+    vk_code == VK_CONTROL
+        || vk_code == VK_MENU
+        || vk_code == VK_SHIFT
+        || vk_code == VK_LWIN
+        || vk_code == VK_RWIN
+}
+
+/// 将虚拟键码转换为人类可读的键名
+fn vk_code_to_readable(vk_code: u32) -> Option<String> {
+    // VK 码 0x30-0x5A 恰好与 ASCII/Unicode 码位一致
+    match vk_code {
+        // 字母 A-Z (0x41-0x5A) 与数字 0-9 (0x30-0x39)
+        v if (0x30..=0x39).contains(&v) || (0x41..=0x5A).contains(&v) => {
+            Some((char::from_u32(v).unwrap_or('?')).to_string())
+        }
+        // 功能键 F1-F24 (0x70-0x87)
+        v if (0x70..=0x87).contains(&v) => {
+            let n = v - 0x70 + 1;
+            if n <= 24 { Some(format!("F{}", n)) } else { None }
+        }
+        // 导航 & 系统
+        VK_BACK      => Some("Backspace".into()),
+        VK_TAB       => Some("Tab".into()),
+        VK_RETURN    => Some("Enter".into()),
+        VK_ESCAPE    => Some("Escape".into()),
+        VK_SPACE     => Some("Space".into()),
+        VK_PRIOR     => Some("PageUp".into()),
+        VK_NEXT      => Some("PageDown".into()),
+        VK_END       => Some("End".into()),
+        VK_HOME      => Some("Home".into()),
+        VK_LEFT      => Some("Left".into()),
+        VK_UP        => Some("Up".into()),
+        VK_RIGHT     => Some("Right".into()),
+        VK_DOWN      => Some("Down".into()),
+        VK_INSERT    => Some("Insert".into()),
+        VK_DELETE    => Some("Delete".into()),
+        VK_CAPITAL   => Some("CapsLock".into()),
+        VK_SNAPSHOT  => Some("PrintScreen".into()),
+        VK_APPS      => Some("Apps".into()),
+        // 小键盘 Num0-Num9 (0x60-0x69)
+        v if (0x60..=0x69).contains(&v) => Some(format!("Num{}", v - 0x60)),
+        VK_MULTIPLY  => Some("Num*".into()),
+        VK_ADD       => Some("Num+".into()),
+        VK_SUBTRACT  => Some("Num-".into()),
+        VK_DECIMAL   => Some("Num.".into()),
+        VK_DIVIDE    => Some("Num/".into()),
+        // OEM 符号键
+        VK_OEM_1     => Some(";:".into()),
+        VK_OEM_PLUS  => Some("=".into()),
+        VK_OEM_COMMA => Some(",".into()),
+        VK_OEM_MINUS => Some("-".into()),
+        VK_OEM_PERIOD=> Some(".".into()),
+        VK_OEM_2     => Some("/".into()),
+        VK_OEM_3     => Some("`".into()),
+        VK_OEM_4     => Some("[".into()),
+        VK_OEM_5     => Some("\\".into()),
+        VK_OEM_6     => Some("]".into()),
+        VK_OEM_7     => Some("'".into()),
+        VK_OEM_102   => Some("<>".into()),
+        _ => None,
+    }
+}
+
+/// 构造录制快捷键字符串（如 "Ctrl+Shift+F1"）
+fn format_captured_key(vk_code: u32) -> Option<String> {
+    let key_name = vk_code_to_readable(vk_code)?;
     let mut parts: Vec<String> = Vec::new();
+
+    // 读取当前修饰键物理状态
+    let ctrl  = unsafe { GetAsyncKeyState(VK_CONTROL as i32) < 0 };
+    let alt   = unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 };
+    let shift = unsafe { GetAsyncKeyState(VK_SHIFT as i32) < 0 };
+    let win   = unsafe { GetAsyncKeyState(VK_LWIN as i32) < 0 }
+                || unsafe { GetAsyncKeyState(VK_RWIN as i32) < 0 };
+
     if ctrl  { parts.push("Ctrl".into()); }
     if alt   { parts.push("Alt".into()); }
     if shift { parts.push("Shift".into()); }
-    parts.push(key.to_uppercase().to_string());
-    parts.join("+")
+    if win   { parts.push("Win".into()); }
+    parts.push(key_name);
+
+    Some(parts.join("+"))
 }
 
 /// 进入快捷键捕获模式（主线程调用）
