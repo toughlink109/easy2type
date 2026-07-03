@@ -18,9 +18,12 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW,
     UnhookWindowsHookEx, KBDLLHOOKSTRUCT, HHOOK,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN, GetForegroundWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+use windows::Win32::UI::Input::Ime::{
+    ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
+};
 
 use crate::config::MAGIC_EXTRA_INFO;
 use crate::debug_log;
@@ -288,6 +291,13 @@ unsafe extern "system" fn keyboard_hook_proc(
             return LRESULT(1);
         }
 
+        // ── v0.6.1：中文输入法检测 ──
+        // 若当前前台窗口的中文 IME 处于激活（打开）状态，跳过所有字母键，
+        // 禁止英文联想与单词补全，避免中英文输入互相干扰。
+        if is_key_down && is_letter_key(vk_code) && is_chinese_ime_active() {
+            return CallNextHookEx(None, n_code, w_param, l_param);
+        }
+
         if !is_key_down {
             return CallNextHookEx(None, n_code, w_param, l_param);
         }
@@ -348,6 +358,23 @@ pub fn is_buffer_clear_key(vk_code: u32) -> bool {
         || vk_code == VK_RETURN
         || vk_code == VK_TAB
         || is_punctuation_key(vk_code)
+}
+
+// ── v0.6.1：中文输入法状态检测 ──
+
+/// 检测前台窗口是否处于中文输入法激活状态。
+/// 通过 IMM32 API 获取输入法上下文，若 IME 打开则返回 true。
+fn is_chinese_ime_active() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let himc = ImmGetContext(hwnd);
+        if himc.is_invalid() {
+            return false;
+        }
+        let open = ImmGetOpenStatus(himc);
+        let _ = ImmReleaseContext(hwnd, himc);
+        open.as_bool()
+    }
 }
 
 pub fn is_ignored_key(vk_code: u32, is_extended: bool) -> bool {

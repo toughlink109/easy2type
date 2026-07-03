@@ -1,8 +1,8 @@
-//! settings.rs — Slint 设置面板管理 (v0.6.0)
+//! settings.rs — Slint 设置面板管理 (v0.6.1)
 //!
 //! 功能：
-//! 1. 窗口居中 + 剔除 WS_THICKFRAME（禁止缩放）
-//! 2. 无边框拖拽（ReleaseCapture + WM_NCLBUTTONDOWN/HTCAPTION）
+//! 1. 窗口居中（GetSystemMetrics 动态测算）
+//! 2. 无边框拖拽（SendMessageW + WM_SYSCOMMAND/SC_MOVE，单次触发）
 //! 3. 快捷键即按即录（Slint Timer 轮询 hook::poll_captured_key）
 //! 4. 智能黑名单 & 词库配置联动
 //!
@@ -18,12 +18,9 @@ mod inner {
 
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowPos, GetWindowLongW, SetWindowLongW,
-        GetSystemMetrics, PostMessageW,
-        GWL_STYLE, WS_THICKFRAME, WS_MAXIMIZEBOX,
-        SWP_NOZORDER, SWP_NOMOVE, SWP_NOSIZE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        FindWindowW, SetWindowPos, GetSystemMetrics, SendMessageW,
+        SWP_NOZORDER, SWP_NOACTIVATE,
         HWND_TOP, SM_CXSCREEN, SM_CYSCREEN,
-        WINDOW_STYLE,
     };
 
     // Slint 生成的 SettingsWindow 类型
@@ -43,22 +40,14 @@ mod inner {
         FindWindowW(None, windows::core::w!("easy2type")).ok()
     }
 
-    /// 窗口居中 + 剔除 WS_THICKFRAME（锁定比例）
-    unsafe fn apply_window_style(hwnd: HWND) {
-        // 居中
+    /// 窗口居中（仅动态测算屏幕分辨率居中，不修改窗口样式）
+    unsafe fn center_window(hwnd: HWND) {
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
         let x = (screen_w - WIN_W) / 2;
         let y = (screen_h - WIN_H) / 2;
         SetWindowPos(hwnd, HWND_TOP, x, y, WIN_W, WIN_H,
             SWP_NOZORDER | SWP_NOACTIVATE);
-
-        // 剔除 WS_THICKFRAME（禁止鼠标拉伸缩放）
-        let style = WINDOW_STYLE(GetWindowLongW(hwnd, GWL_STYLE) as u32);
-        let new_style = style & !WS_THICKFRAME & !WS_MAXIMIZEBOX;
-        SetWindowLongW(hwnd, GWL_STYLE, new_style.0 as i32);
-        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     }
 
     // ── 从 config + state 同步属性到 Slint 窗口 ──
@@ -164,14 +153,14 @@ mod inner {
                 });
 
                 // ════════════════════════════════════
-                // 绑定回调（6）：无边框拖拽
+                // 绑定回调（6）：无边框拖拽（单次触发，SendMessageW 阻塞式拖拽）
                 // ════════════════════════════════════
                 window.on_start_drag(move || {
                     unsafe {
                         if let Some(hwnd) = find_settings_hwnd() {
-                            // WM_SYSCOMMAND + SC_MOVE|HTCAPTION = 0xF012
-                            // 通知 Windows 进入标题栏拖拽模式，无需手动 ReleaseCapture
-                            PostMessageW(
+                            // WM_SYSCOMMAND(0x0112) + SC_MOVE(0xF010)|HTCAPTION(2) = 0xF012
+                            // SendMessageW 同步等待拖拽结束，由 PointerEventKind.down 单次触发
+                            SendMessageW(
                                 hwnd,
                                 0x0112u32, // WM_SYSCOMMAND
                                 WPARAM(0xF012usize),
@@ -194,10 +183,10 @@ mod inner {
                 // ── 显示窗口 ──
                 window.show().unwrap();
 
-                // ── 窗口居中 & 锁定比例 ──
+                // ── 窗口居中 ──
                 unsafe {
                     if let Some(hwnd) = find_settings_hwnd() {
-                        apply_window_style(hwnd);
+                        center_window(hwnd);
                     }
                 }
 

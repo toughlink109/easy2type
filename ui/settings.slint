@@ -328,8 +328,8 @@ export component SettingsWindow inherits Window {
                 background: transparent;
 
                 drag-area := TouchArea {
-                    moved => {
-                        if (drag-area.pressed) {
+                    pointer-event(pe) => {
+                        if (pe.kind == PointerEventKind.down) {
                             root.start-drag();
                         }
                     }
