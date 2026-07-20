@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW,
     RegisterClassW, PostQuitMessage, TranslateMessage, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, MSG, CS_HREDRAW, CS_VREDRAW,
-    WM_DESTROY, WM_CLOSE, WM_COMMAND, PM_REMOVE, DestroyWindow,
+    WM_DESTROY, WM_CLOSE, WM_COMMAND, WM_QUIT, PM_REMOVE, DestroyWindow,
     WM_LBUTTONUP, WM_RBUTTONUP,
 };
 
@@ -138,7 +138,7 @@ unsafe fn run_event_loop(
         // 1. Windows 消息
         let mut msg: MSG = std::mem::zeroed();
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-            if msg.message == WM_DESTROY {
+            if msg.message == WM_DESTROY || msg.message == WM_QUIT {
                 hook_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 debug_log!("Main", "退出");
@@ -148,10 +148,7 @@ unsafe fn run_event_loop(
             DispatchMessageW(&msg);
         }
 
-        // 2c. 快捷键捕获轮询 (v0.4.0)
-        if let Some(combo) = hook::poll_captured_key() {
-            debug_log!("Main", "[Main] 捕获快捷键: {}", combo);
-        }
+        // 2c. 快捷键捕获由设置面板线程自行轮询，主循环不消费
 
         // 3. 钩子事件
         loop {
@@ -175,14 +172,16 @@ unsafe fn run_event_loop(
                     let buffer_len = app_state.get_buffer().len();
                     if buffer_len > 0 {
                         if let Some(ref overlay) = G_OVERLAY {
-                            overlay.set_selected(n);
-                            if let Some((word, _)) = overlay.selected_info() {
-                                debug_log!("Main", "数字{}选词: '{}' -> '{}'", n + 1, app_state.get_buffer(), word);
-                                simulate::complete_word(buffer_len, &word);
-                                app_state.clear_buffer();
-                                *app_state.prediction.lock().unwrap() = None;
-                                overlay.hide();
-                                hook::set_osd_visible(false);
+                            // set_selected 会检查越界，越界时直接忽略
+                            if overlay.set_selected(n) {
+                                if let Some((word, _)) = overlay.selected_info() {
+                                    debug_log!("Main", "数字{}选词: '{}' -> '{}'", n + 1, app_state.get_buffer(), word);
+                                    simulate::complete_word(buffer_len, &word);
+                                    app_state.clear_buffer();
+                                    *app_state.prediction.lock().unwrap() = None;
+                                    overlay.hide();
+                                    hook::set_osd_visible(false);
+                                }
                             }
                         }
                     }
@@ -203,13 +202,15 @@ unsafe fn run_event_loop(
                     // ── Ctrl+数字键: 直接选候选词（不经过 buffer） ──
                     if event.ctrl_down && is_digit_key(event.vk_code) {
                         let digit = (event.vk_code - '0' as u32) as usize;
-                        // 数字键 1~7 对应索引 0~6
-                        if digit >= 1 && digit <= 7 {
+                        // 数字键 1~9 对应索引 0~8
+                        if digit >= 1 && digit <= 9 {
                             let idx = digit - 1;
                             if let Some(ref overlay) = G_OVERLAY {
+                                // 先更新选中高亮，越界则忽略
+                                if !overlay.set_selected(idx) {
+                                    continue;
+                                }
                                 if let Some((word, _)) = overlay.selected_info() {
-                                    // 先更新选中高亮
-                                    overlay.set_selected(idx);
                                     // 用当前选中的词执行补全
                                     let buffer_len = app_state.get_buffer().len();
                                     if buffer_len > 0 {
@@ -322,7 +323,7 @@ unsafe fn run_event_loop(
 
 fn main() {
     logger::init();
-    debug_log!("Main", "easy2type v0.4.0 启动中...");
+    debug_log!("Main", "easy2type v{} 启动中...", env!("CARGO_PKG_VERSION"));
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -334,11 +335,15 @@ fn main() {
     let app_config = config::AppConfig::load("config.json");
     debug_log!("Main", "配置加载: candidates={}", app_config.candidate_limit);
 
+    // 初始化模拟输入后台线程，避免补全时阻塞 UI
+    simulate::init_simulate_worker();
+    debug_log!("Main", "模拟输入后台线程已启动");
+
     // 初始化钩子快捷键
     hook::update_hotkey(&app_config.toggle_shortcut);
 
+    let trie = dictionary::load_dictionary_from_config(&app_config);
     let app_state = Arc::new(AppState::new(app_config));
-    let trie = dictionary::load_dictionary();
     let word_count = trie.word_count();
     let predictor = predictor::Predictor::new(trie);
     debug_log!("Main", "词库就绪: {} 词", word_count);
@@ -357,7 +362,8 @@ fn main() {
         let hwnd = create_hidden_window(h_instance.into()).expect("创建主窗口失败");
         debug_log!("Main", "隐藏消息窗口已创建");
 
-        let overlay = overlay::Overlay::new(h_instance.into()).expect("创建覆盖层失败");
+        let overlay_config = app_state.config.lock().unwrap().clone();
+        let overlay = overlay::Overlay::new(h_instance.into(), &overlay_config).expect("创建覆盖层失败");
         debug_log!("Main", "OSD 覆盖层已创建");
 
         G_APP_STATE = Some(app_state.clone());
@@ -378,7 +384,13 @@ fn main() {
         debug_log!("Main", "进入主事件循环");
         run_event_loop(hook_rx, hook_stop, app_state, predictor);
 
-        debug_log!("Main", "主循环退出, 等待钩子线程...");
+        debug_log!("Main", "主循环退出, 关闭设置面板并通知钩子线程...");
+        #[cfg(feature = "slint-ui")]
+        {
+            crate::settings::close_window();
+            crate::settings::join_window_thread();
+        }
+        hook::stop_hook_thread();
         let _ = hook_handle.join();
         CoUninitialize();
     }

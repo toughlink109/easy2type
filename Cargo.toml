@@ -1,6 +1,6 @@
 [package]
 name = "easy2type"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 description = "Windows 桌面英文输入辅助工具 — Slint 孟菲斯风 + 模糊纠错"
 
@@ -28,6 +28,8 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_Ime",
 ] }
 crossbeam = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 slint = { version = "1", optional = true }
 
 [features]

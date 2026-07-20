@@ -1,6 +1,12 @@
 {
-    "toggle_shortcut": "Ctrl+T",
-    "complete_shortcut": "Tab",
-    "candidate_limit": 4,
-    "modifier_key": "Ctrl"
+  "toggle_shortcut": "Ctrl+T",
+  "complete_shortcut": "Tab",
+  "candidate_limit": 7,
+  "modifier_key": "Ctrl",
+  "filter_digits": true,
+  "filter_urls": true,
+  "dictionary_name": "通用高频词库",
+  "dictionary_path": "assets/words.txt",
+  "overlay_skin_name": "memphis",
+  "custom_skin_path": ""
 }
