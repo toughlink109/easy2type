@@ -5,32 +5,28 @@
 use std::sync::Arc;
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, BOOL, HINSTANCE, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateCompatibleBitmap, CreateSolidBrush, CreateFontW,
-    FillRect, DeleteDC, DeleteObject, SelectObject, SetBkMode, SetTextColor,
-    TextOutW, GetDC, ReleaseDC,
-    TRANSPARENT, FW_BOLD, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-    CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FF_DONTCARE,
-    CreateBitmap, PatBlt, BLACKNESS,
-};
-use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NIF_MESSAGE, NIF_TIP, NIF_ICON, NOTIFYICONDATAW,
-    NIF_STATE, NIS_HIDDEN,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
-    DestroyMenu, DestroyWindow, GetCursorPos, MF_STRING, MF_SEPARATOR,
-    TPM_RIGHTBUTTON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_NONOTIFY,
-    WM_LBUTTONUP, WM_RBUTTONUP, WM_LBUTTONDBLCLK, WM_USER, WM_DESTROY,
-    LoadIconW, IDI_APPLICATION, HICON, ICONINFO, CreateIconIndirect,
-    MessageBoxW, MB_OK, MB_ICONINFORMATION,
+    CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+    DeleteDC, DeleteObject, FillRect, GetDC, PatBlt, ReleaseDC, SelectObject, SetBkMode,
+    SetTextColor, TextOutW, BLACKNESS, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY,
+    FF_DONTCARE, FW_BOLD, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyMenu, DestroyWindow, GetCursorPos,
+    LoadIconW, MessageBoxW, SetForegroundWindow, TrackPopupMenu, HICON, ICONINFO,
+    MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    WM_USER,
+};
 
-use crate::state::AppState;
 use crate::debug_log;
+use crate::state::AppState;
 
 /// 托盘消息 ID
 pub const WM_APP_TRAY: u32 = WM_USER + 1;
@@ -49,6 +45,12 @@ pub struct TrayManager {
     visible: bool,
     /// 设置面板回调（主线程注册）
     pub on_show_settings: Option<Box<dyn Fn() + Send>>,
+}
+
+impl Drop for TrayManager {
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
 }
 
 impl TrayManager {
@@ -90,7 +92,11 @@ impl TrayManager {
             let result = Shell_NotifyIconW(NIM_ADD, &self.nid);
             if result.as_bool() {
                 self.visible = true;
-                debug_log!("Tray", "Shell_NotifyIconW(NIM_ADD) 成功, icon={:?}", self.nid.hIcon.0);
+                debug_log!(
+                    "Tray",
+                    "Shell_NotifyIconW(NIM_ADD) 成功, icon={:?}",
+                    self.nid.hIcon.0
+                );
                 Ok(())
             } else {
                 let err = windows::core::Error::from_win32();
@@ -143,10 +149,10 @@ impl TrayManager {
 
         match event {
             WM_LBUTTONUP => {
-                let new_mode = self.state.toggle_mode();
-                let _ = self.update_tooltip();
-                let msg = if new_mode.is_active() { "开启" } else { "隐形" };
-                debug_log!("Tray", "左键单击 → 状态切换: {}", msg);
+                debug_log!("Tray", "左键单击 → 打开设置面板");
+                if let Some(ref cb) = self.on_show_settings {
+                    cb();
+                }
                 true
             }
             WM_LBUTTONDBLCLK => {
@@ -178,10 +184,10 @@ impl TrayManager {
             let _ = AppendMenuW(menu, MF_STRING, IDM_ABOUT, w!("关于 easy2type"));
             let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT, w!("退出"));
 
-            SetForegroundWindow(self.hwnd);
+            let _ = SetForegroundWindow(self.hwnd);
 
             let mut pt = std::mem::zeroed();
-            GetCursorPos(&mut pt);
+            let _ = GetCursorPos(&mut pt);
 
             // TPM_RETURNCMD: 直接返回菜单 ID 而非发送 WM_COMMAND
             // TPM_NONOTIFY: 不发送任何通知消息
@@ -199,7 +205,7 @@ impl TrayManager {
                 debug_log!("Tray", "菜单选中 cmd_id={}", cmd.0);
                 self.handle_menu_command_direct(cmd.0 as usize);
             }
-            DestroyMenu(menu);
+            let _ = DestroyMenu(menu);
         }
     }
 
@@ -209,7 +215,11 @@ impl TrayManager {
             IDM_TOGGLE => {
                 let new_mode = self.state.toggle_mode();
                 let _ = self.update_tooltip();
-                let msg = if new_mode.is_active() { "开启" } else { "隐形" };
+                let msg = if new_mode.is_active() {
+                    "开启"
+                } else {
+                    "隐形"
+                };
                 debug_log!("Tray", "切换状态 → {}", msg);
             }
             IDM_SETTINGS => {
@@ -223,7 +233,7 @@ impl TrayManager {
                 unsafe {
                     let _ = MessageBoxW(
                         self.hwnd,
-                        w!("easy2type v0.5.0\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("easy2type v0.7.1\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
                         w!("关于 easy2type"),
                         MB_OK | MB_ICONINFORMATION,
                     );
@@ -246,7 +256,11 @@ impl TrayManager {
             IDM_TOGGLE => {
                 let new_mode = self.state.toggle_mode();
                 let _ = self.update_tooltip();
-                let msg = if new_mode.is_active() { "开启" } else { "隐形" };
+                let msg = if new_mode.is_active() {
+                    "开启"
+                } else {
+                    "隐形"
+                };
                 println!("[Tray] {}", msg);
                 true
             }
@@ -262,7 +276,7 @@ impl TrayManager {
                 unsafe {
                     let _ = MessageBoxW(
                         self.hwnd,
-                        w!("easy2type v0.5.0\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("easy2type v0.7.1\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
                         w!("关于 easy2type"),
                         MB_OK | MB_ICONINFORMATION,
                     );
@@ -291,7 +305,11 @@ fn create_tray_icon() -> HICON {
         if let Ok(h_inst) = GetModuleHandleW(None) {
             let icon_id: PCWSTR = windows::core::PCWSTR(crate::config::IDI_ICON_ID as *const u16);
             if let Ok(icon) = LoadIconW(h_inst, icon_id) {
-                debug_log!("Tray", "图标: 资源 ID={} 加载成功", crate::config::IDI_ICON_ID);
+                debug_log!(
+                    "Tray",
+                    "图标: 资源 ID={} 加载成功",
+                    crate::config::IDI_ICON_ID
+                );
                 return icon;
             }
         }
@@ -308,7 +326,12 @@ fn create_tray_icon() -> HICON {
 
         // 回退 3: GDI 绘制 32x32 蓝底白字 "e"
         let screen_dc = GetDC(None);
-        let rc = RECT { left: 0, top: 0, right: 32, bottom: 32 };
+        let rc = RECT {
+            left: 0,
+            top: 0,
+            right: 32,
+            bottom: 32,
+        };
 
         // ── 颜色位图: 32x32, 兼容屏幕色彩格式 ──
         let color_dc = CreateCompatibleDC(screen_dc);
@@ -321,11 +344,22 @@ fn create_tray_icon() -> HICON {
         let _ = DeleteObject(bg);
 
         // 白色字母 "e"
-        let font = CreateFontW(22, 0, 0, 0, FW_BOLD.0 as i32,
-            0, 0, 0, DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-            DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
-            w!("Segoe UI"));
+        let font = CreateFontW(
+            22,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            DEFAULT_QUALITY.0 as u32,
+            FF_DONTCARE.0 as u32,
+            w!("Segoe UI"),
+        );
         let old_font = SelectObject(color_dc, font);
         let _ = SetBkMode(color_dc, TRANSPARENT);
         let _ = SetTextColor(color_dc, windows::Win32::Foundation::COLORREF(0x00FFFFFF));

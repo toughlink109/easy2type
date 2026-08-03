@@ -5,31 +5,28 @@
 
 #![allow(non_snake_case)]
 
+use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use serde::Deserialize;
 
-use windows::core::{PCWSTR, w};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM, COLORREF, RECT, SIZE};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, EndPaint, CreateFontW, DeleteObject, SelectObject,
-    SetBkMode, SetTextColor, TextOutW,
-    CreateSolidBrush, FillRect, GetStockObject, InvalidateRect,
-    GetTextExtentPoint32W, CreateRoundRectRgn, SetWindowRgn,
-    PAINTSTRUCT, HFONT, HBRUSH,
-    TRANSPARENT, NULL_BRUSH, FW_NORMAL, FW_BOLD,
-    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-    DEFAULT_QUALITY, FF_DONTCARE, PS_SOLID, CreatePen,
-    DeleteObject as DeleteGdiObject,
+    BeginPaint, CreateFontW, CreatePen, CreateRoundRectRgn, CreateSolidBrush, DeleteObject,
+    DeleteObject as DeleteGdiObject, EndPaint, FillRect, GetMonitorInfoW, GetStockObject,
+    GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint, SelectObject, SetBkMode, SetTextColor,
+    SetWindowRgn, TextOutW, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, FF_DONTCARE,
+    FW_BOLD, FW_NORMAL, HBRUSH, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH,
+    OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, ShowWindow, SetWindowPos, DestroyWindow,
-    SetLayeredWindowAttributes,
-    RegisterClassW, WNDCLASSW,
-    WS_POPUP, WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE,
-    LWA_COLORKEY, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    CS_HREDRAW, CS_VREDRAW, WM_PAINT, WM_DESTROY,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, RegisterClassW,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST,
+    LWA_COLORKEY, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::caret::CaretPos;
@@ -42,16 +39,17 @@ const COLOR_KEY: COLORREF = COLORREF(0x00FF00FF); // 透明色键（品红）
 const ROW_HEIGHT: i32 = 36;
 const PADDING_H: i32 = 12;
 const SEPARATOR_WIDTH: i32 = 24;
-const CORNER_RADIUS: i32 = 12;       // 窗口圆角
+const CORNER_RADIUS: i32 = 12; // 窗口圆角
+const CARET_GAP: i32 = 6;
 
 // 配色
-const BG_COLOR: COLORREF = COLORREF(0x00F9F8F8);    // #F8F9FA 暖灰 (BGR)
+const BG_COLOR: COLORREF = COLORREF(0x00F9F8F8); // #F8F9FA 暖灰 (BGR)
 const CARD_BORDER: COLORREF = COLORREF(0x00F0ECE8); // #E8ECF0 卡片边框
 const TEXT_PRIMARY: COLORREF = COLORREF(0x00503E2C); // #2C3E50 主文字
 const TEXT_SECONDARY: COLORREF = COLORREF(0x008D8C7F); // #7F8C8D 次文字
-const ACCENT_BLUE: COLORREF = COLORREF(0x00FF964D);  // #4D96FF 天蓝编号 (BGR)
-const SELECTED_BG: COLORREF = COLORREF(0x00E2D4F0);  // #F0D4E2 淡蓝选中背景
-const SEP_COLOR: COLORREF = COLORREF(0x00F0ECE8);    // #E8ECF0 分隔线
+const ACCENT_BLUE: COLORREF = COLORREF(0x00FF964D); // #4D96FF 天蓝编号 (BGR)
+const SELECTED_BG: COLORREF = COLORREF(0x00E2D4F0); // #F0D4E2 淡蓝选中背景
+const SEP_COLOR: COLORREF = COLORREF(0x00F0ECE8); // #E8ECF0 分隔线
 
 // ── 全局渲染状态 ──
 struct OverlayState {
@@ -131,17 +129,53 @@ impl OverlayTheme {
                 separator: "#475569".to_string(),
                 ..Self::default()
             },
-            "custom" => Self::load_custom(&cfg.custom_skin_path).unwrap_or_else(Self::default),
+            "custom" => {
+                Self::load_custom_file(&cfg.custom_skin_path).unwrap_or_else(|_| Self::default())
+            }
             _ => Self::default(),
         }
     }
 
-    fn load_custom(path: &str) -> Option<Self> {
+    pub fn load_custom_file(path: &str) -> Result<Self, String> {
         if path.trim().is_empty() {
-            return None;
+            return Err("皮肤文件路径为空".to_string());
         }
-        let raw = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str::<Self>(&raw).ok()
+        let raw =
+            std::fs::read_to_string(path).map_err(|error| format!("无法读取皮肤文件：{error}"))?;
+        Self::from_custom_json(&raw)
+    }
+
+    pub fn from_custom_json(raw: &str) -> Result<Self, String> {
+        let theme = serde_json::from_str::<Self>(raw)
+            .map_err(|error| format!("皮肤 JSON 无效：{error}"))?;
+        theme.validate()?;
+        Ok(theme)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for color in [
+            &self.background,
+            &self.border,
+            &self.textPrimary,
+            &self.textSecondary,
+            &self.accent,
+            &self.selectedBackground,
+            &self.separator,
+        ] {
+            if !is_valid_hex_color(color) {
+                return Err(format!("无效颜色值：{color}"));
+            }
+        }
+        if self.fontName.trim().is_empty() {
+            return Err("字体名称不能为空".to_string());
+        }
+        if !(8..=72).contains(&self.fontHeight) {
+            return Err("fontHeight 必须在 8 到 72 之间".to_string());
+        }
+        if !(0..=40).contains(&self.cornerRadius) {
+            return Err("cornerRadius 必须在 0 到 40 之间".to_string());
+        }
+        Ok(())
     }
 
     fn colorRef(value: &str, fallback: COLORREF) -> COLORREF {
@@ -158,6 +192,11 @@ impl OverlayTheme {
     }
 }
 
+fn is_valid_hex_color(value: &str) -> bool {
+    let hex = value.trim().strip_prefix('#').unwrap_or_default();
+    hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 static G_STATE: Mutex<OverlayState> = Mutex::new(OverlayState {
     candidates: Vec::new(),
     selected: 0,
@@ -167,6 +206,54 @@ static G_STATE: Mutex<OverlayState> = Mutex::new(OverlayState {
 
 static G_THEME: Mutex<Option<OverlayTheme>> = Mutex::new(None);
 
+fn work_area_for_point(caret: CaretPos) -> RECT {
+    unsafe {
+        let monitor = MonitorFromPoint(
+            POINT {
+                x: caret.x,
+                y: caret.y,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        );
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
+            monitor_info.rcWork
+        } else {
+            RECT {
+                left: 0,
+                top: 0,
+                right: GetSystemMetrics(SM_CXSCREEN),
+                bottom: GetSystemMetrics(SM_CYSCREEN),
+            }
+        }
+    }
+}
+
+fn calculate_overlay_position(
+    caret: CaretPos,
+    overlay_width: i32,
+    overlay_height: i32,
+    work_area: RECT,
+) -> (i32, i32) {
+    let max_x = (work_area.right - overlay_width).max(work_area.left);
+    let x = caret.x.clamp(work_area.left, max_x);
+
+    let below = caret.y + CARET_GAP;
+    let above = caret.y - overlay_height - CARET_GAP;
+    let max_y = (work_area.bottom - overlay_height).max(work_area.top);
+    let y = if below + overlay_height <= work_area.bottom {
+        below
+    } else {
+        above
+    }
+    .clamp(work_area.top, max_y);
+
+    (x, y)
+}
+
 pub struct Overlay {
     hwnd: HWND,
     visible: Arc<AtomicBool>,
@@ -175,9 +262,16 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn new(h_instance: HINSTANCE, cfg: &crate::config::AppConfig) -> Result<Self, windows::core::Error> {
+    pub fn new(
+        h_instance: HINSTANCE,
+        cfg: &crate::config::AppConfig,
+    ) -> Result<Self, windows::core::Error> {
         let theme = OverlayTheme::from_config(cfg);
-        let fontName: Vec<u16> = theme.fontName.encode_utf16().chain(std::iter::once(0)).collect();
+        let fontName: Vec<u16> = theme
+            .fontName
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         *G_THEME.lock().unwrap() = Some(theme.clone());
 
         let wc = WNDCLASSW {
@@ -198,9 +292,14 @@ impl Overlay {
         // 常规字体（候选词文本）
         let font = unsafe {
             CreateFontW(
-                theme.fontHeight, 0, 0, 0,
+                theme.fontHeight,
+                0,
+                0,
+                0,
                 FW_NORMAL.0 as i32,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 DEFAULT_CHARSET.0 as u32,
                 OUT_DEFAULT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
@@ -213,9 +312,14 @@ impl Overlay {
         // 加粗字体（数字编号）
         let bold_font = unsafe {
             CreateFontW(
-                theme.fontHeight, 0, 0, 0,
+                theme.fontHeight,
+                0,
+                0,
+                0,
                 FW_BOLD.0 as i32,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 DEFAULT_CHARSET.0 as u32,
                 OUT_DEFAULT_PRECIS.0 as u32,
                 CLIP_DEFAULT_PRECIS.0 as u32,
@@ -235,8 +339,14 @@ impl Overlay {
                 OVERLAY_CLASS_NAME,
                 w!(""),
                 WS_POPUP,
-                0, 0, 300, ROW_HEIGHT,
-                None, None, h_instance, None,
+                0,
+                0,
+                300,
+                ROW_HEIGHT,
+                None,
+                None,
+                h_instance,
+                None,
             )?
         };
 
@@ -253,7 +363,10 @@ impl Overlay {
     }
 
     pub fn show_candidates(&self, _input: &str, candidates: &[Candidate], caret: CaretPos) {
-        if candidates.is_empty() { self.hide(); return; }
+        if candidates.is_empty() {
+            self.hide();
+            return;
+        }
 
         let (total_w, _) = Self::measure_window_size(candidates);
 
@@ -265,11 +378,18 @@ impl Overlay {
             state.height = ROW_HEIGHT;
         }
 
+        let work_area = work_area_for_point(caret);
+        let (overlay_x, overlay_y) =
+            calculate_overlay_position(caret, total_w, ROW_HEIGHT, work_area);
+
         unsafe {
             let _ = SetWindowPos(
-                self.hwnd, HWND_TOPMOST,
-                caret.x, caret.y + 24,
-                total_w, ROW_HEIGHT,
+                self.hwnd,
+                HWND_TOPMOST,
+                overlay_x,
+                overlay_y,
+                total_w,
+                ROW_HEIGHT,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
 
@@ -281,8 +401,12 @@ impl Overlay {
                 .map(|theme| theme.cornerRadius)
                 .unwrap_or(CORNER_RADIUS);
             let region = CreateRoundRectRgn(
-                0, 0, total_w + 1, ROW_HEIGHT + 1,
-                cornerRadius, cornerRadius,
+                0,
+                0,
+                total_w + 1,
+                ROW_HEIGHT + 1,
+                cornerRadius,
+                cornerRadius,
             );
             let _ = SetWindowRgn(self.hwnd, region, true);
 
@@ -296,7 +420,9 @@ impl Overlay {
         let mut state = G_STATE.lock().unwrap();
         if index < state.candidates.len() {
             state.selected = index;
-            unsafe { let _ = InvalidateRect(self.hwnd, None, true); }
+            unsafe {
+                let _ = InvalidateRect(self.hwnd, None, true);
+            }
             true
         } else {
             false
@@ -310,7 +436,10 @@ impl Overlay {
 
     pub fn selected_info(&self) -> Option<(String, usize)> {
         let state = G_STATE.lock().unwrap();
-        state.candidates.get(state.selected).map(|c| (c.word.clone(), state.selected))
+        state
+            .candidates
+            .get(state.selected)
+            .map(|c| (c.word.clone(), state.selected))
     }
 
     pub fn hide(&self) {
@@ -333,21 +462,36 @@ impl Overlay {
         }
 
         let font = unsafe {
-            CreateFontW(20, 0, 0, 0, FW_NORMAL.0 as i32,
-                0, 0, 0, DEFAULT_CHARSET.0 as u32,
-                OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-                DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
-                w!("Segoe UI"))
+            CreateFontW(
+                20,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET.0 as u32,
+                OUT_DEFAULT_PRECIS.0 as u32,
+                CLIP_DEFAULT_PRECIS.0 as u32,
+                DEFAULT_QUALITY.0 as u32,
+                FF_DONTCARE.0 as u32,
+                w!("Segoe UI"),
+            )
         };
         let old_font = unsafe { SelectObject(hdc, font) };
 
         let mut total_w = PADDING_H;
         for (i, c) in candidates.iter().enumerate() {
-            if i > 0 { total_w += SEPARATOR_WIDTH; }
+            if i > 0 {
+                total_w += SEPARATOR_WIDTH;
+            }
             let label = format!("{}. {}", i + 1, c.word);
             let wide: Vec<u16> = label.encode_utf16().collect();
             let mut size = SIZE::default();
-            unsafe { let _ = GetTextExtentPoint32W(hdc, &wide, &mut size); }
+            unsafe {
+                let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+            }
             total_w += size.cx;
         }
         total_w += PADDING_H;
@@ -372,8 +516,10 @@ impl Drop for Overlay {
 }
 
 unsafe extern "system" fn overlay_wnd_proc(
-    hwnd: HWND, msg: u32,
-    _w_param: WPARAM, _l_param: LPARAM,
+    hwnd: HWND,
+    msg: u32,
+    _w_param: WPARAM,
+    _l_param: LPARAM,
 ) -> LRESULT {
     match msg {
         WM_PAINT => {
@@ -404,19 +550,33 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
     let accentColor = OverlayTheme::colorRef(&theme.accent, ACCENT_BLUE);
     let selectedBg = OverlayTheme::colorRef(&theme.selectedBackground, SELECTED_BG);
     let separatorColor = OverlayTheme::colorRef(&theme.separator, SEP_COLOR);
-    let fontName: Vec<u16> = theme.fontName.encode_utf16().chain(std::iter::once(0)).collect();
+    let fontName: Vec<u16> = theme
+        .fontName
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let w = state.width;
     let h = state.height;
 
     // ── 背景（品红 → 透明，然后绘制暖灰圆角卡片） ──
     let key_brush = CreateSolidBrush(COLOR_KEY);
-    let full_rc = RECT { left: 0, top: 0, right: w, bottom: h };
+    let full_rc = RECT {
+        left: 0,
+        top: 0,
+        right: w,
+        bottom: h,
+    };
     let _ = FillRect(hdc, &full_rc, key_brush);
     let _ = DeleteGdiObject(key_brush);
 
     // 暖灰圆角背景
     let bg_brush = CreateSolidBrush(bgColor);
-    let bg_rc = RECT { left: 3, top: 2, right: w - 3, bottom: h - 2 };
+    let bg_rc = RECT {
+        left: 3,
+        top: 2,
+        right: w - 3,
+        bottom: h - 2,
+    };
     let _ = FillRect(hdc, &bg_rc, bg_brush);
     let _ = DeleteGdiObject(bg_brush);
 
@@ -426,16 +586,38 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
     // 仅用 FillRect 画出卡片区域即可，边框由 SetWindowRgn 裁剪实现
 
     // ── 字体 ──
-    let font = CreateFontW(theme.fontHeight, 0, 0, 0, FW_NORMAL.0 as i32,
-        0, 0, 0, DEFAULT_CHARSET.0 as u32,
-        OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-        DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
-        PCWSTR(fontName.as_ptr()));
-    let bold_font = CreateFontW(theme.fontHeight, 0, 0, 0, FW_BOLD.0 as i32,
-        0, 0, 0, DEFAULT_CHARSET.0 as u32,
-        OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-        DEFAULT_QUALITY.0 as u32, FF_DONTCARE.0 as u32,
-        PCWSTR(fontName.as_ptr()));
+    let font = CreateFontW(
+        theme.fontHeight,
+        0,
+        0,
+        0,
+        FW_NORMAL.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        DEFAULT_QUALITY.0 as u32,
+        FF_DONTCARE.0 as u32,
+        PCWSTR(fontName.as_ptr()),
+    );
+    let bold_font = CreateFontW(
+        theme.fontHeight,
+        0,
+        0,
+        0,
+        FW_BOLD.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        DEFAULT_QUALITY.0 as u32,
+        FF_DONTCARE.0 as u32,
+        PCWSTR(fontName.as_ptr()),
+    );
 
     let old_font = SelectObject(hdc, font);
     let _ = SetBkMode(hdc, TRANSPARENT);
@@ -453,7 +635,9 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
             let sep: Vec<u16> = "│".encode_utf16().collect();
             let _ = TextOutW(hdc, x + 5, y_center, &sep);
             x += SEPARATOR_WIDTH;
-            if !op.is_invalid() { SelectObject(hdc, op); }
+            if !op.is_invalid() {
+                SelectObject(hdc, op);
+            }
         }
 
         // 编号文本
@@ -478,8 +662,10 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
         if i == state.selected {
             let sel_brush = CreateSolidBrush(selectedBg);
             let sel_rc = RECT {
-                left: x - 2, top: 3,
-                right: x + total_item_w + 2, bottom: h - 3,
+                left: x - 2,
+                top: 3,
+                right: x + total_item_w + 2,
+                bottom: h - 3,
             };
             let _ = FillRect(hdc, &sel_rc, sel_brush);
             let _ = DeleteGdiObject(sel_brush);
@@ -492,7 +678,11 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
 
         // ── 绘制候选词（主文字色） ──
         SelectObject(hdc, font);
-        let word_color = if c.distance > 0 { textSecondary } else { textPrimary };
+        let word_color = if c.distance > 0 {
+            textSecondary
+        } else {
+            textPrimary
+        };
         let _ = SetTextColor(hdc, word_color);
         let word_x = x + num_size.cx + 2;
         let _ = TextOutW(hdc, word_x, y_center, &word_wide);
@@ -502,9 +692,67 @@ unsafe fn paint_memphis(hdc: windows::Win32::Graphics::Gdi::HDC) {
 
     // 清理
     SelectObject(hdc, old_font);
-    if !old_pen.is_invalid() { SelectObject(hdc, old_pen); }
+    if !old_pen.is_invalid() {
+        SelectObject(hdc, old_pen);
+    }
     let _ = DeleteGdiObject(font);
     let _ = DeleteGdiObject(bold_font);
     let _ = DeleteGdiObject(sep_pen);
     let _ = DeleteGdiObject(top_pen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn places_overlay_below_current_line() {
+        let work = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        };
+        let position = calculate_overlay_position(
+            CaretPos {
+                x: 320,
+                y: 240,
+                is_fallback: false,
+            },
+            400,
+            36,
+            work,
+        );
+        assert_eq!(position, (320, 246));
+    }
+
+    #[test]
+    fn keeps_overlay_inside_monitor_work_area() {
+        let work = RECT {
+            left: 100,
+            top: 50,
+            right: 900,
+            bottom: 650,
+        };
+        let position = calculate_overlay_position(
+            CaretPos {
+                x: 850,
+                y: 640,
+                is_fallback: false,
+            },
+            300,
+            36,
+            work,
+        );
+        assert_eq!(position, (600, 598));
+    }
+
+    #[test]
+    fn validates_custom_theme_values() {
+        let valid = r##"{"background":"#20242B","fontHeight":20,"cornerRadius":12}"##;
+        assert!(OverlayTheme::from_custom_json(valid).is_ok());
+
+        let invalid = r##"{"background":"blue","fontHeight":3}"##;
+        assert!(OverlayTheme::from_custom_json(invalid).is_err());
+    }
 }

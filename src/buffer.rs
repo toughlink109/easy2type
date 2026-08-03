@@ -3,7 +3,9 @@
 //! 维护用户正在输入的单词片段，在每次按键时更新。
 //! 输出预测更新请求，供主线程调用 predictor + overlay。
 
-use crate::hook::{self, KeyEvent, VK_BACK, VK_SPACE, VK_TAB, VK_OEM_PERIOD};
+use crate::hook::{self, KeyEvent, VK_BACK, VK_TAB};
+#[cfg(test)]
+use crate::hook::{VK_OEM_PERIOD, VK_SPACE};
 use crate::state::AppState;
 
 /// 处理按键后的动作
@@ -58,12 +60,51 @@ pub fn process_key_event(event: &KeyEvent, state: &AppState) -> BufferAction {
     let ch = hook::vk_to_char(vk, event.shift_down);
     if let Some(c) = ch {
         if c.is_ascii_alphabetic() || c == '-' || c == '\'' {
+            let cfg = state.config.lock().unwrap();
+            let buffer = state.get_buffer();
+
+            // 智能黑名单：包含数字的输入不触发联想
+            if cfg.filter_digits
+                && (c.is_ascii_digit() || buffer.contains(|x: char| x.is_ascii_digit()))
+            {
+                return BufferAction::ClearPrediction;
+            }
+
+            // 智能黑名单：网址与路径模式不触发联想
+            if cfg.filter_urls && is_url_or_path_pattern(&buffer, c) {
+                return BufferAction::ClearPrediction;
+            }
+            drop(cfg); // 释放锁后再 push
+
             state.push_to_buffer(c);
             return BufferAction::UpdatePrediction;
         }
     }
 
     BufferAction::NoOp
+}
+
+/// 判断当前输入是否处于网址或路径模式
+fn is_url_or_path_pattern(buffer: &str, ch: char) -> bool {
+    // 路径分隔符或 Windows 盘符冒号
+    if ch == '\\' || ch == '/' || ch == ':' {
+        return true;
+    }
+    // 已存在路径特征
+    if buffer.contains("http") || buffer.contains("https") || buffer.contains("www") {
+        return true;
+    }
+    if buffer.contains("\\") || buffer.contains('/') {
+        return true;
+    }
+    // 类似 C: 或 D: 的 Windows 盘符
+    if buffer.len() == 1 {
+        let first = buffer.chars().next().unwrap_or('\0');
+        if first.is_ascii_alphabetic() && ch == ':' {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -15,14 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmGetOpenStatus, ImmReleaseContext};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyboardLayout};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, KBDLLHOOKSTRUCT, HHOOK,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN, GetForegroundWindow,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-use windows::Win32::UI::Input::Ime::{
-    ImmGetContext, ImmGetOpenStatus, ImmReleaseContext,
+    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use crate::config::MAGIC_EXTRA_INFO;
@@ -40,7 +38,7 @@ pub const VK_CAPITAL: u32 = 0x14;
 pub const VK_ESCAPE: u32 = 0x1B;
 pub const VK_SPACE: u32 = 0x20;
 pub const VK_PRIOR: u32 = 0x21; // Page Up
-pub const VK_NEXT: u32 = 0x22;  // Page Down
+pub const VK_NEXT: u32 = 0x22; // Page Down
 pub const VK_END: u32 = 0x23;
 pub const VK_HOME: u32 = 0x24;
 pub const VK_LEFT: u32 = 0x25;
@@ -53,19 +51,24 @@ pub const VK_DELETE: u32 = 0x2E;
 pub const VK_LWIN: u32 = 0x5B;
 pub const VK_RWIN: u32 = 0x5C;
 pub const VK_APPS: u32 = 0x5D;
-pub const VK_OEM_1: u32 = 0xBA;      // ;:
-pub const VK_OEM_PLUS: u32 = 0xBB;   // =+
-pub const VK_OEM_COMMA: u32 = 0xBC;  // ,
-pub const VK_OEM_MINUS: u32 = 0xBD;  // -_
+pub const VK_MULTIPLY: u32 = 0x6A;
+pub const VK_ADD: u32 = 0x6B;
+pub const VK_SUBTRACT: u32 = 0x6D;
+pub const VK_DECIMAL: u32 = 0x6E;
+pub const VK_DIVIDE: u32 = 0x6F;
+pub const VK_OEM_1: u32 = 0xBA; // ;:
+pub const VK_OEM_PLUS: u32 = 0xBB; // =+
+pub const VK_OEM_COMMA: u32 = 0xBC; // ,
+pub const VK_OEM_MINUS: u32 = 0xBD; // -_
 pub const VK_OEM_PERIOD: u32 = 0xBE; // .
-pub const VK_OEM_2: u32 = 0xBF;      // /?
-pub const VK_OEM_3: u32 = 0xC0;      // `~
-pub const VK_OEM_4: u32 = 0xDB;      // [{
-pub const VK_OEM_5: u32 = 0xDC;      // \|
-pub const VK_OEM_6: u32 = 0xDD;      // ]}
-pub const VK_OEM_7: u32 = 0xDE;      // '"
+pub const VK_OEM_2: u32 = 0xBF; // /?
+pub const VK_OEM_3: u32 = 0xC0; // `~
+pub const VK_OEM_4: u32 = 0xDB; // [{
+pub const VK_OEM_5: u32 = 0xDC; // \|
+pub const VK_OEM_6: u32 = 0xDD; // ]}
+pub const VK_OEM_7: u32 = 0xDE; // '"
 pub const VK_OEM_8: u32 = 0xDF;
-pub const VK_OEM_102: u32 = 0xE2;    // <> on non-US keyboards
+pub const VK_OEM_102: u32 = 0xE2; // <> on non-US keyboards
 
 // ── 全局变量：供 keyboard_hook_proc（extern fn）访问 ──
 
@@ -75,8 +78,10 @@ static G_HOOK_SENDER: Mutex<Option<Sender<HookCommand>>> = Mutex::new(None);
 /// OSD 覆盖层可见标志（供钩子回调读取，决定是否吞数字键）
 static G_OSD_VISIBLE: AtomicBool = AtomicBool::new(false);
 
-/// Ctrl+T 切换请求标志
-static G_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// 钩子线程 ID（用于退出时发送 WM_QUIT 唤醒消息泵）
+static G_HOOK_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+// (保留用于未来去抖动或请求队列)
 
 /// 快捷键捕获模式（true = 正在监听下一个组合键）
 static G_KEY_CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
@@ -90,37 +95,70 @@ static G_KEY_CAPTURED: AtomicBool = AtomicBool::new(false);
 static G_HOTKEY_CTRL: AtomicBool = AtomicBool::new(true);
 static G_HOTKEY_ALT: AtomicBool = AtomicBool::new(false);
 static G_HOTKEY_SHIFT: AtomicBool = AtomicBool::new(false);
+static G_HOTKEY_WIN: AtomicBool = AtomicBool::new(false);
 static G_HOTKEY_VK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new('T' as u32);
+/// 防止长按切换热键时连续触发
+static G_HOTKEY_IS_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// 解析快捷键字符串中的虚拟键码
+fn parse_shortcut_vk(part: &str) -> Option<u32> {
+    let upper = part.trim().to_uppercase();
+    // 单字符：字母/数字
+    if upper.len() == 1 {
+        return Some(upper.chars().next().unwrap() as u32);
+    }
+    // 功能键 F1-F24
+    if let Some(stripped) = upper.strip_prefix('F') {
+        if let Ok(n) = stripped.parse::<u32>() {
+            if n >= 1 && n <= 24 {
+                return Some(0x6F + n - 1); // VK_F1 = 0x70
+            }
+        }
+    }
+    // 特殊键
+    match upper.as_str() {
+        "TAB" => Some(VK_TAB),
+        "SPACE" => Some(VK_SPACE),
+        "ENTER" | "RETURN" => Some(VK_RETURN),
+        "ESCAPE" | "ESC" => Some(VK_ESCAPE),
+        "BACKSPACE" | "BACK" => Some(VK_BACK),
+        "DELETE" => Some(VK_DELETE),
+        "HOME" => Some(VK_HOME),
+        "END" => Some(VK_END),
+        "PAGEUP" => Some(VK_PRIOR),
+        "PAGEDOWN" => Some(VK_NEXT),
+        "UP" => Some(VK_UP),
+        "DOWN" => Some(VK_DOWN),
+        "LEFT" => Some(VK_LEFT),
+        "RIGHT" => Some(VK_RIGHT),
+        "INSERT" => Some(VK_INSERT),
+        "PRINTSCREEN" => Some(VK_SNAPSHOT),
+        "CAPSLOCK" => Some(VK_CAPITAL),
+        _ => None,
+    }
+}
 
 /// 更新全局快捷键（主线程加载配置或 settings 修改配置时调用）
 pub fn update_hotkey(shortcut: &str) {
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
+    let mut win = false;
     let mut vk = 0u32;
 
-    let parts = shortcut.split('+');
-    for part in parts {
-        let part = part.trim().to_uppercase();
-        if part == "CTRL" {
+    let parts: Vec<&str> = shortcut.split('+').collect();
+    for part in &parts {
+        let part = part.trim();
+        if part.eq_ignore_ascii_case("CTRL") {
             ctrl = true;
-        } else if part == "ALT" {
+        } else if part.eq_ignore_ascii_case("ALT") {
             alt = true;
-        } else if part == "SHIFT" {
+        } else if part.eq_ignore_ascii_case("SHIFT") {
             shift = true;
-        } else if part.len() == 1 {
-            vk = part.chars().next().unwrap() as u32;
-        } else {
-            // Handle common special keys
-            if part == "TAB" {
-                vk = VK_TAB;
-            } else if part == "SPACE" {
-                vk = VK_SPACE;
-            } else if part == "ENTER" || part == "RETURN" {
-                vk = VK_RETURN;
-            } else if part == "ESCAPE" || part == "ESC" {
-                vk = VK_ESCAPE;
-            }
+        } else if part.eq_ignore_ascii_case("WIN") {
+            win = true;
+        } else if let Some(v) = parse_shortcut_vk(part) {
+            vk = v;
         }
     }
 
@@ -128,8 +166,17 @@ pub fn update_hotkey(shortcut: &str) {
         G_HOTKEY_CTRL.store(ctrl, Ordering::Release);
         G_HOTKEY_ALT.store(alt, Ordering::Release);
         G_HOTKEY_SHIFT.store(shift, Ordering::Release);
+        G_HOTKEY_WIN.store(win, Ordering::Release);
         G_HOTKEY_VK.store(vk, Ordering::Release);
-        debug_log!("Hook", "更新快捷键为: Ctrl={}, Alt={}, Shift={}, VK={}", ctrl, alt, shift, vk);
+        debug_log!(
+            "Hook",
+            "更新快捷键为: Ctrl={}, Alt={}, Shift={}, Win={}, VK={}",
+            ctrl,
+            alt,
+            shift,
+            win,
+            vk
+        );
     }
 }
 
@@ -173,32 +220,44 @@ pub fn start_hook_thread() -> (
     (rx, stop_flag, handle)
 }
 
+/// 通知钩子线程退出（发送 WM_QUIT 唤醒 GetMessageW）
+pub fn stop_hook_thread() {
+    unsafe {
+        let tid = G_HOOK_THREAD_ID.load(Ordering::Acquire);
+        if tid != 0 {
+            let _ = PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// 钩子线程主函数：注册钩子 + 消息泵
 fn hook_thread_main(stop_flag: Arc<AtomicBool>) {
-    debug_log!("Hook", "钩子线程启动 tid={:?}", std::thread::current().id());
+    let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    G_HOOK_THREAD_ID.store(tid, Ordering::Release);
+    debug_log!(
+        "Hook",
+        "钩子线程启动 tid={:?} os_tid={}",
+        std::thread::current().id(),
+        tid
+    );
 
     let h_instance = unsafe {
         windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
             .expect("钩子线程：获取模块句柄失败")
     };
 
-    let hook: HHOOK = match unsafe {
-        SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(keyboard_hook_proc),
-            h_instance,
-            0,
-        )
-    } {
-        Ok(h) => {
-            debug_log!("Hook", "WH_KEYBOARD_LL 注册成功 handle={:?}", h.0);
-            h
-        }
-        Err(e) => {
-            debug_log!("Hook", "FATAL: 注册键盘钩子失败: {:?}", e);
-            return;
-        }
-    };
+    let hook: HHOOK =
+        match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), h_instance, 0) }
+        {
+            Ok(h) => {
+                debug_log!("Hook", "WH_KEYBOARD_LL 注册成功 handle={:?}", h.0);
+                h
+            }
+            Err(e) => {
+                debug_log!("Hook", "FATAL: 注册键盘钩子失败: {:?}", e);
+                return;
+            }
+        };
 
     debug_log!("Hook", "进入独立 GetMessageW 消息泵");
 
@@ -240,22 +299,30 @@ unsafe extern "system" fn keyboard_hook_proc(
         }
 
         let is_key_down = w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
-        let is_key_up = w_param.0 as u32 == 0x0101; // WM_KEYUP = 0x0101
+        let is_key_up = w_param.0 as u32 == WM_KEYUP || w_param.0 as u32 == WM_SYSKEYUP;
 
         let vk_code = kb.vkCode;
 
-        // Ctrl/Shift/Alt 状态
+        // Ctrl/Shift/Alt/Win 状态
         let ctrl_down = GetAsyncKeyState(VK_CONTROL as i32) < 0;
         let shift_down = GetAsyncKeyState(VK_SHIFT as i32) < 0;
         let alt_down = GetAsyncKeyState(VK_MENU as i32) < 0;
+        let win_down = GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0;
 
-        // ── 数字键 1~9 直选候选词（仅 OSD 可见 + 无 Ctrl/Alt） ──
-        if G_OSD_VISIBLE.load(Ordering::Relaxed) && is_digit_key(vk_code) && !ctrl_down && !alt_down {
+        // ── 数字键 1~9 直选候选词（仅 OSD 可见 + 无 Ctrl/Alt/Win） ──
+        if G_OSD_VISIBLE.load(Ordering::Relaxed)
+            && is_digit_key(vk_code)
+            && !ctrl_down
+            && !alt_down
+            && !win_down
+        {
             if is_key_down {
                 let n = (vk_code - '0' as u32) as usize;
                 if n >= 1 && n <= 9 {
-                    if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
-                        let _ = tx.send(HookCommand::SelectN(n - 1)); // 0-based index
+                    if let Ok(sender) = G_HOOK_SENDER.try_lock() {
+                        if let Some(ref tx) = *sender {
+                            let _ = tx.send(HookCommand::SelectN(n - 1)); // 0-based index
+                        }
                     }
                 }
             }
@@ -269,7 +336,9 @@ unsafe extern "system" fn keyboard_hook_proc(
             // 非修饰键按下 → 构造组合键字符串 → 结束录制
             if is_key_down && !is_modifier_key(vk_code) {
                 if let Some(combo) = format_captured_key(vk_code) {
-                    *G_CAPTURED_KEY.lock().unwrap() = Some(combo);
+                    if let Ok(mut captured) = G_CAPTURED_KEY.try_lock() {
+                        *captured = Some(combo);
+                    }
                     G_KEY_CAPTURED.store(true, Ordering::Release);
                     G_KEY_CAPTURE_MODE.store(false, Ordering::Release);
                 }
@@ -278,17 +347,33 @@ unsafe extern "system" fn keyboard_hook_proc(
             return LRESULT(1);
         }
 
-        // 动态配置的切换模式快捷键
+        // 动态配置的切换模式快捷键（严格匹配：未配置的修饰键必须松开）
         let hk_ctrl = G_HOTKEY_CTRL.load(Ordering::Relaxed);
         let hk_alt = G_HOTKEY_ALT.load(Ordering::Relaxed);
         let hk_shift = G_HOTKEY_SHIFT.load(Ordering::Relaxed);
+        let hk_win = G_HOTKEY_WIN.load(Ordering::Relaxed);
         let hk_vk = G_HOTKEY_VK.load(Ordering::Relaxed);
 
-        if is_key_down && (ctrl_down == hk_ctrl) && (alt_down == hk_alt) && (shift_down == hk_shift) && vk_code == hk_vk {
-            if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
-                let _ = tx.send(HookCommand::ToggleMode);
+        if is_key_down
+            && vk_code == hk_vk
+            && ctrl_down == hk_ctrl
+            && alt_down == hk_alt
+            && shift_down == hk_shift
+            && win_down == hk_win
+            && !G_HOTKEY_IS_DOWN.swap(true, Ordering::Acquire)
+        {
+            // 使用 try_lock 避免阻塞系统输入
+            if let Ok(sender) = G_HOOK_SENDER.try_lock() {
+                if let Some(ref tx) = *sender {
+                    let _ = tx.send(HookCommand::ToggleMode);
+                }
             }
             return LRESULT(1);
+        }
+
+        // 热键抬起时重置状态
+        if is_key_up && vk_code == hk_vk {
+            G_HOTKEY_IS_DOWN.store(false, Ordering::Release);
         }
 
         // ── v0.6.1：中文输入法检测 ──
@@ -302,8 +387,8 @@ unsafe extern "system" fn keyboard_hook_proc(
             return CallNextHookEx(None, n_code, w_param, l_param);
         }
 
-        // KF_EXTENDED = 0x0100
-        let is_extended = (kb.flags.0 & 0x0100u32) != 0;
+        // LLKHF_EXTENDED = 0x0001
+        let is_extended = (kb.flags.0 & 0x0001u32) != 0;
 
         let event = KeyEvent {
             vk_code,
@@ -313,8 +398,10 @@ unsafe extern "system" fn keyboard_hook_proc(
             is_extended,
         };
 
-        if let Some(ref tx) = *G_HOOK_SENDER.lock().unwrap() {
-            let _ = tx.send(HookCommand::Key(event));
+        if let Ok(sender) = G_HOOK_SENDER.try_lock() {
+            if let Some(ref tx) = *sender {
+                let _ = tx.send(HookCommand::Key(event));
+            }
         }
     }
 
@@ -354,19 +441,31 @@ pub fn is_punctuation_key(vk_code: u32) -> bool {
 }
 
 pub fn is_buffer_clear_key(vk_code: u32) -> bool {
-    vk_code == VK_SPACE
-        || vk_code == VK_RETURN
-        || vk_code == VK_TAB
-        || is_punctuation_key(vk_code)
+    vk_code == VK_SPACE || vk_code == VK_RETURN || vk_code == VK_TAB || is_punctuation_key(vk_code)
 }
 
 // ── v0.6.1：中文输入法状态检测 ──
 
 /// 检测前台窗口是否处于中文输入法激活状态。
-/// 通过 IMM32 API 获取输入法上下文，若 IME 打开则返回 true。
+/// 先按键盘布局语言 ID 过滤，避免日文/韩文等 IME 被误拦截；
+/// 再通过 IMM32 API 获取输入法上下文，若 IME 打开则返回 true。
 fn is_chinese_ime_active() -> bool {
     unsafe {
+        // 取前台窗口所在线程的键盘布局，而不是钩子线程自己的布局
         let hwnd = GetForegroundWindow();
+        let tid = GetWindowThreadProcessId(hwnd, None);
+        let hkl = GetKeyboardLayout(tid);
+        if hkl.0.is_null() {
+            return false;
+        }
+        let lang_id = (hkl.0 as usize) & 0xFFFF;
+        // 主语言位为中文（LANG_CHINESE = 0x04），可覆盖
+        // zh-CN(0x0804)、zh-TW(0x0404)、zh-HK(0x0C04)、zh-SG(0x1004)、zh-MO(0x1404) 等
+        const LANG_CHINESE: u16 = 0x04;
+        if (lang_id & 0x03FF) as u16 != LANG_CHINESE {
+            return false;
+        }
+
         let himc = ImmGetContext(hwnd);
         if himc.is_invalid() {
             return false;
@@ -435,9 +534,17 @@ pub fn vk_to_char(vk_code: u32, shift_down: bool) -> Option<char> {
             Some((b'0' + digit) as char)
         }
     } else if vk_code == VK_OEM_MINUS {
-        if shift_down { Some('_') } else { Some('-') }
+        if shift_down {
+            Some('_')
+        } else {
+            Some('-')
+        }
     } else if vk_code == VK_OEM_7 {
-        if shift_down { Some('"') } else { Some('\'') }
+        if shift_down {
+            Some('"')
+        } else {
+            Some('\'')
+        }
     } else {
         None
     }
@@ -465,47 +572,51 @@ fn vk_code_to_readable(vk_code: u32) -> Option<String> {
         // 功能键 F1-F24 (0x70-0x87)
         v if (0x70..=0x87).contains(&v) => {
             let n = v - 0x70 + 1;
-            if n <= 24 { Some(format!("F{}", n)) } else { None }
+            if n <= 24 {
+                Some(format!("F{}", n))
+            } else {
+                None
+            }
         }
         // 导航 & 系统
-        VK_BACK      => Some("Backspace".into()),
-        VK_TAB       => Some("Tab".into()),
-        VK_RETURN    => Some("Enter".into()),
-        VK_ESCAPE    => Some("Escape".into()),
-        VK_SPACE     => Some("Space".into()),
-        VK_PRIOR     => Some("PageUp".into()),
-        VK_NEXT      => Some("PageDown".into()),
-        VK_END       => Some("End".into()),
-        VK_HOME      => Some("Home".into()),
-        VK_LEFT      => Some("Left".into()),
-        VK_UP        => Some("Up".into()),
-        VK_RIGHT     => Some("Right".into()),
-        VK_DOWN      => Some("Down".into()),
-        VK_INSERT    => Some("Insert".into()),
-        VK_DELETE    => Some("Delete".into()),
-        VK_CAPITAL   => Some("CapsLock".into()),
-        VK_SNAPSHOT  => Some("PrintScreen".into()),
-        VK_APPS      => Some("Apps".into()),
+        VK_BACK => Some("Backspace".into()),
+        VK_TAB => Some("Tab".into()),
+        VK_RETURN => Some("Enter".into()),
+        VK_ESCAPE => Some("Escape".into()),
+        VK_SPACE => Some("Space".into()),
+        VK_PRIOR => Some("PageUp".into()),
+        VK_NEXT => Some("PageDown".into()),
+        VK_END => Some("End".into()),
+        VK_HOME => Some("Home".into()),
+        VK_LEFT => Some("Left".into()),
+        VK_UP => Some("Up".into()),
+        VK_RIGHT => Some("Right".into()),
+        VK_DOWN => Some("Down".into()),
+        VK_INSERT => Some("Insert".into()),
+        VK_DELETE => Some("Delete".into()),
+        VK_CAPITAL => Some("CapsLock".into()),
+        VK_SNAPSHOT => Some("PrintScreen".into()),
+        VK_APPS => Some("Apps".into()),
         // 小键盘 Num0-Num9 (0x60-0x69)
         v if (0x60..=0x69).contains(&v) => Some(format!("Num{}", v - 0x60)),
-        VK_MULTIPLY  => Some("Num*".into()),
-        VK_ADD       => Some("Num+".into()),
-        VK_SUBTRACT  => Some("Num-".into()),
-        VK_DECIMAL   => Some("Num.".into()),
-        VK_DIVIDE    => Some("Num/".into()),
+        VK_MULTIPLY => Some("Num*".into()),
+        VK_ADD => Some("Num+".into()),
+        VK_SUBTRACT => Some("Num-".into()),
+        VK_DECIMAL => Some("Num.".into()),
+        VK_DIVIDE => Some("Num/".into()),
         // OEM 符号键
-        VK_OEM_1     => Some(";:".into()),
-        VK_OEM_PLUS  => Some("=".into()),
+        VK_OEM_1 => Some(";:".into()),
+        VK_OEM_PLUS => Some("=".into()),
         VK_OEM_COMMA => Some(",".into()),
         VK_OEM_MINUS => Some("-".into()),
-        VK_OEM_PERIOD=> Some(".".into()),
-        VK_OEM_2     => Some("/".into()),
-        VK_OEM_3     => Some("`".into()),
-        VK_OEM_4     => Some("[".into()),
-        VK_OEM_5     => Some("\\".into()),
-        VK_OEM_6     => Some("]".into()),
-        VK_OEM_7     => Some("'".into()),
-        VK_OEM_102   => Some("<>".into()),
+        VK_OEM_PERIOD => Some(".".into()),
+        VK_OEM_2 => Some("/".into()),
+        VK_OEM_3 => Some("`".into()),
+        VK_OEM_4 => Some("[".into()),
+        VK_OEM_5 => Some("\\".into()),
+        VK_OEM_6 => Some("]".into()),
+        VK_OEM_7 => Some("'".into()),
+        VK_OEM_102 => Some("<>".into()),
         _ => None,
     }
 }
@@ -516,16 +627,24 @@ fn format_captured_key(vk_code: u32) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
     // 读取当前修饰键物理状态
-    let ctrl  = unsafe { GetAsyncKeyState(VK_CONTROL as i32) < 0 };
-    let alt   = unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 };
+    let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL as i32) < 0 };
+    let alt = unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 };
     let shift = unsafe { GetAsyncKeyState(VK_SHIFT as i32) < 0 };
-    let win   = unsafe { GetAsyncKeyState(VK_LWIN as i32) < 0 }
-                || unsafe { GetAsyncKeyState(VK_RWIN as i32) < 0 };
+    let win = unsafe { GetAsyncKeyState(VK_LWIN as i32) < 0 }
+        || unsafe { GetAsyncKeyState(VK_RWIN as i32) < 0 };
 
-    if ctrl  { parts.push("Ctrl".into()); }
-    if alt   { parts.push("Alt".into()); }
-    if shift { parts.push("Shift".into()); }
-    if win   { parts.push("Win".into()); }
+    if ctrl {
+        parts.push("Ctrl".into());
+    }
+    if alt {
+        parts.push("Alt".into());
+    }
+    if shift {
+        parts.push("Shift".into());
+    }
+    if win {
+        parts.push("Win".into());
+    }
     parts.push(key_name);
 
     Some(parts.join("+"))

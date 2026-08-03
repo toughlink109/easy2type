@@ -1,30 +1,46 @@
-//! settings.rs — Slint 设置面板管理 (v0.6.1)
+//! settings.rs — Slint 设置面板管理。
 //!
 //! 功能：
-//! 1. 窗口居中（GetSystemMetrics 动态测算）
-//! 2. 无边框拖拽（SendMessageW + WM_SYSCOMMAND/SC_MOVE，单次触发）
+//! 1. 设置窗口按当前显示器工作区居中并主动激活
+//! 2. 无边框拖拽与八方向缩放
 //! 3. 快捷键即按即录（Slint Timer 轮询 hook::poll_captured_key）
-//! 4. 智能黑名单 & 词库配置联动
+//! 4. 原生文件选择器导入词库和候选窗皮肤
 //!
 //! 仅在 `slint-ui` feature 启用时编译。
 
 #[cfg(feature = "slint-ui")]
 mod inner {
-    use std::sync::Mutex;
-    use slint::ComponentHandle;
-    use crate::state::AppState;
-    use crate::config::AppConfig;
+    use std::path::Path;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowPos, GetSystemMetrics, PostMessageW, ShowWindow,
-        SWP_NOZORDER, SWP_NOACTIVATE, SWP_FRAMECHANGED,
-        HWND_TOP, SM_CXSCREEN, SM_CYSCREEN, SM_CXFRAME, SM_CYFRAME,
-        GetWindowLongW, SetWindowLongW, GWL_STYLE, WS_SIZEBOX,
-        SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE,
+    use slint::ComponentHandle;
+
+    use crate::config::AppConfig;
+    use crate::debug_log;
+    use crate::state::AppState;
+
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
-    use windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetActiveWindow, SetFocus};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, FindWindowW, GetCursorPos, GetWindowLongW, GetWindowRect, PostMessageW,
+        SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_STYLE, HWND_TOP,
+        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_MAXIMIZE,
+        SW_MINIMIZE, SW_RESTORE, WS_SIZEBOX,
+    };
 
     // Slint 生成的 SettingsWindow 类型
     slint::include_modules!();
@@ -35,18 +51,86 @@ mod inner {
     /// 设置窗口 UI 线程句柄，用于程序退出时等待其结束
     static G_WINDOW_HANDLE: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 
-    const WIN_W: i32 = 600;
-    const WIN_H: i32 = 520;
-
     // 无框窗口拖拽 / 缩放常量
     const WM_NCLBUTTONDOWN: u32 = 0x00A1;
     const HTCAPTION: usize = 2;
 
     // ── 工具函数 ──
 
-    /// 通过窗口标题查找 Slint 设置窗口的 HWND
+    /// 通过唯一标题查找 Slint 设置窗口，避免命中隐藏消息窗口 Easy2Type。
     unsafe fn find_settings_hwnd() -> Option<HWND> {
-        FindWindowW(None, windows::core::w!("easy2type")).ok()
+        FindWindowW(None, w!("easy2type 设置")).ok()
+    }
+
+    /// 在鼠标所在显示器的可用工作区居中并激活设置窗口。
+    unsafe fn center_and_activate_settings_window(hwnd: HWND) {
+        let style = GetWindowLongW(hwnd, GWL_STYLE);
+        let _ = SetWindowLongW(hwnd, GWL_STYLE, style | WS_SIZEBOX.0 as i32);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+
+        let mut cursor = POINT::default();
+        let _ = GetCursorPos(&mut cursor);
+        let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        let mut monitor_info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mut window_rect = RECT::default();
+
+        if GetMonitorInfoW(monitor, &mut monitor_info).as_bool()
+            && GetWindowRect(hwnd, &mut window_rect).is_ok()
+        {
+            let width = window_rect.right - window_rect.left;
+            let height = window_rect.bottom - window_rect.top;
+            let work = monitor_info.rcWork;
+            let x = work.left + ((work.right - work.left - width) / 2).max(0);
+            let y = work.top + ((work.bottom - work.top - height) / 2).max(0);
+            let _ = SetWindowPos(hwnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
+        }
+
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetFocus(hwnd);
+    }
+
+    /// 打开 Windows 原生单文件选择窗口。
+    fn choose_file(
+        title: PCWSTR,
+        filters: &[COMDLG_FILTERSPEC],
+        default_extension: PCWSTR,
+    ) -> Option<String> {
+        unsafe {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let options = dialog.GetOptions().ok()?;
+            dialog
+                .SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM)
+                .ok()?;
+            dialog.SetTitle(title).ok()?;
+            dialog.SetFileTypes(filters).ok()?;
+            dialog.SetDefaultExtension(default_extension).ok()?;
+            dialog.Show(find_settings_hwnd().unwrap_or_default()).ok()?;
+
+            let item = dialog.GetResult().ok()?;
+            let raw_path = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = raw_path.to_string().ok();
+            CoTaskMemFree(Some(raw_path.0 as *const core::ffi::c_void));
+            path
+        }
+    }
+
+    fn set_status(window: &SettingsWindow, message: &str, is_error: bool) {
+        window.set_status_message(message.into());
+        window.set_status_error(is_error);
     }
 
     // ── 从 config + state 同步属性到 Slint 窗口 ──
@@ -71,8 +155,19 @@ mod inner {
         if !G_WINDOW_THREAD_SPAWNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let app_clone = app_state.clone();
             let handle = std::thread::spawn(move || {
-                let window = SettingsWindow::new()
-                    .expect("创建 Slint 设置窗口失败");
+                debug_log!("Settings", "设置窗口线程启动");
+                let com_initialized =
+                    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+                debug_log!("Settings", "COM STA 初始化结果={}", com_initialized);
+                let window = match SettingsWindow::new() {
+                    Ok(window) => window,
+                    Err(error) => {
+                        debug_log!("Settings", "创建 Slint 设置窗口失败: {}", error);
+                        G_WINDOW_THREAD_SPAWNED.store(false, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                };
+                debug_log!("Settings", "Slint 设置窗口已创建");
 
                 // ── 初始化属性 ──
                 {
@@ -154,17 +249,59 @@ mod inner {
                 });
 
                 let app_import_dict = app_clone.clone();
-                window.on_import_dictionary(move |path| {
-                    let path = path.to_string();
-                    if !crate::dictionary::is_supported_dictionary_path(&path) {
-                        println!("[Settings] 词库导入失败：仅支持 .txt / .tsv / .csv");
+                let weak_import_dict = window.as_weak();
+                window.on_import_dictionary(move || {
+                    let filters = [
+                        COMDLG_FILTERSPEC {
+                            pszName: w!("词库文件"),
+                            pszSpec: w!("*.txt;*.tsv;*.csv"),
+                        },
+                        COMDLG_FILTERSPEC {
+                            pszName: w!("所有文件"),
+                            pszSpec: w!("*.*"),
+                        },
+                    ];
+                    let Some(path) = choose_file(w!("选择要导入的词库"), &filters, w!("txt"))
+                    else {
+                        return;
+                    };
+                    let Some(window) = weak_import_dict.upgrade() else {
+                        return;
+                    };
+
+                    if !Path::new(&path).is_file()
+                        || !crate::dictionary::is_supported_dictionary_path(&path)
+                    {
+                        set_status(
+                            &window,
+                            "导入失败：请选择 .txt、.tsv 或 .csv 词库文件。",
+                            true,
+                        );
                         return;
                     }
+
+                    let raw = match std::fs::read_to_string(&path) {
+                        Ok(raw) => raw,
+                        Err(_) => {
+                            set_status(&window, "导入失败：无法读取该词库文件。", true);
+                            return;
+                        }
+                    };
+                    if crate::dictionary::load_dictionary_from_str(&raw).word_count() == 0 {
+                        set_status(&window, "导入失败：文件中没有可用的英文词条。", true);
+                        return;
+                    }
+
                     let mut cfg = app_import_dict.config.lock().unwrap();
                     cfg.dictionary_name = "自定义导入词库".to_string();
-                    cfg.dictionary_path = path;
-                    let _ = cfg.save("config.json");
-                    println!("[Settings] 词库导入路径已保存，重启应用后生效");
+                    cfg.dictionary_path = path.clone();
+                    if cfg.save("config.json").is_err() {
+                        set_status(&window, "导入失败：无法保存配置文件。", true);
+                        return;
+                    }
+                    window.set_current_dictionary("自定义导入词库".into());
+                    window.set_dictionary_path(path.into());
+                    set_status(&window, "词库导入成功，重启软件后生效。", false);
                 });
 
                 let app_skin = app_clone.clone();
@@ -175,12 +312,46 @@ mod inner {
                 });
 
                 let app_custom_skin = app_clone.clone();
-                window.on_import_custom_skin(move |path| {
+                let weak_custom_skin = window.as_weak();
+                window.on_import_custom_skin(move || {
+                    let filters = [
+                        COMDLG_FILTERSPEC {
+                            pszName: w!("候选窗皮肤"),
+                            pszSpec: w!("*.json"),
+                        },
+                        COMDLG_FILTERSPEC {
+                            pszName: w!("所有文件"),
+                            pszSpec: w!("*.*"),
+                        },
+                    ];
+                    let Some(path) = choose_file(w!("选择候选窗皮肤"), &filters, w!("json"))
+                    else {
+                        return;
+                    };
+                    let Some(window) = weak_custom_skin.upgrade() else {
+                        return;
+                    };
+
+                    if !Path::new(&path).is_file() || !path.to_ascii_lowercase().ends_with(".json")
+                    {
+                        set_status(&window, "导入失败：请选择 .json 皮肤文件。", true);
+                        return;
+                    }
+                    if crate::overlay::OverlayTheme::load_custom_file(&path).is_err() {
+                        set_status(&window, "导入失败：皮肤 JSON 格式或字段值无效。", true);
+                        return;
+                    }
+
                     let mut cfg = app_custom_skin.config.lock().unwrap();
                     cfg.overlay_skin_name = "custom".to_string();
-                    cfg.custom_skin_path = path.to_string();
-                    let _ = cfg.save("config.json");
-                    println!("[Settings] 自定义皮肤路径已保存，重启应用后生效");
+                    cfg.custom_skin_path = path.clone();
+                    if cfg.save("config.json").is_err() {
+                        set_status(&window, "导入失败：无法保存配置文件。", true);
+                        return;
+                    }
+                    window.set_overlay_skin_name("custom".into());
+                    window.set_custom_skin_path(path.into());
+                    set_status(&window, "皮肤导入成功，重启软件后生效。", false);
                 });
 
                 // ════════════════════════════════════
@@ -202,17 +373,15 @@ mod inner {
                     }
                 });
 
-                window.on_start_resize(move |hit_test| {
-                    unsafe {
-                        if let Some(hwnd) = find_settings_hwnd() {
-                            let _ = ReleaseCapture();
-                            let _ = PostMessageW(
-                                hwnd,
-                                WM_NCLBUTTONDOWN,
-                                WPARAM(hit_test as usize),
-                                LPARAM(0isize),
-                            );
-                        }
+                window.on_start_resize(move |hit_test| unsafe {
+                    if let Some(hwnd) = find_settings_hwnd() {
+                        let _ = ReleaseCapture();
+                        let _ = PostMessageW(
+                            hwnd,
+                            WM_NCLBUTTONDOWN,
+                            WPARAM(hit_test as usize),
+                            LPARAM(0isize),
+                        );
                     }
                 });
 
@@ -229,11 +398,9 @@ mod inner {
                 // ════════════════════════════════════
                 // 绑定回调（8）：最小化 / 最大化 / 关闭
                 // ════════════════════════════════════
-                window.on_window_minimize(move || {
-                    unsafe {
-                        if let Some(hwnd) = find_settings_hwnd() {
-                            let _ = ShowWindow(hwnd, SW_MINIMIZE);
-                        }
+                window.on_window_minimize(move || unsafe {
+                    if let Some(hwnd) = find_settings_hwnd() {
+                        let _ = ShowWindow(hwnd, SW_MINIMIZE);
                     }
                 });
 
@@ -259,30 +426,17 @@ mod inner {
                 });
 
                 // ── 显示窗口 ──
-                window.show().unwrap();
+                if let Err(error) = window.show() {
+                    debug_log!("Settings", "显示设置窗口失败: {}", error);
+                    G_WINDOW_THREAD_SPAWNED.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+                debug_log!("Settings", "设置窗口已显示");
 
-                // ── 窗口居中并恢复可缩放边框 ──
-                // Slint no-frame 窗口默认不带 WS_SIZEBOX，手动补上以恢复边缘拖拽缩放。
-                // 补上 WS_SIZEBOX 后非客户区会增厚，因此调整窗口整体尺寸，使客户区仍
-                // 保持 600x480，避免 Slint 坐标映射错误导致点击失效。
+                // Slint 无框窗口补上可缩放样式，再按当前显示器工作区居中并激活。
                 unsafe {
                     if let Some(hwnd) = find_settings_hwnd() {
-                        let style = GetWindowLongW(hwnd, GWL_STYLE);
-                        let _ = SetWindowLongW(hwnd, GWL_STYLE, style | (WS_SIZEBOX.0 as i32));
-                        let frame_x = GetSystemMetrics(SM_CXFRAME);
-                        let frame_y = GetSystemMetrics(SM_CYFRAME);
-                        let total_w = WIN_W + frame_x * 2;
-                        let total_h = WIN_H + frame_y * 2;
-                        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-                        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-                        let x = (screen_w - total_w) / 2;
-                        let y = (screen_h - total_h) / 2;
-                        let _ = SetWindowPos(
-                            hwnd,
-                            HWND_TOP,
-                            x, y, total_w, total_h,
-                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-                        );
+                        center_and_activate_settings_window(hwnd);
                     }
                 }
 
@@ -327,6 +481,10 @@ mod inner {
 
                 slint::run_event_loop().unwrap();
 
+                if com_initialized {
+                    unsafe { CoUninitialize() };
+                }
+
                 // 事件循环退出后，重置创建标志和弱引用，允许下次重新创建窗口
                 G_WINDOW_THREAD_SPAWNED.store(false, std::sync::atomic::Ordering::SeqCst);
                 *G_WINDOW.lock().unwrap() = None;
@@ -343,6 +501,14 @@ mod inner {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(w) = weak_show.upgrade() {
                             let _ = w.show();
+                            unsafe {
+                                if let Some(hwnd) = find_settings_hwnd() {
+                                    let _ = BringWindowToTop(hwnd);
+                                    let _ = SetForegroundWindow(hwnd);
+                                    let _ = SetActiveWindow(hwnd);
+                                    let _ = SetFocus(hwnd);
+                                }
+                            }
                         }
                     });
                 }

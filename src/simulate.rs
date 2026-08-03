@@ -1,14 +1,15 @@
 //! simulate.rs — 键盘模拟（SendInput + dwExtraInfo 魔法标记）
 //!
 //! 所有模拟输入带 dwExtraInfo = 0xEA52，钩子检测到后直接放行。
+//! v0.6.2 起在独立后台线程执行，避免阻塞主事件循环。
 
+use crossbeam::channel::{unbounded, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KEYBD_EVENT_FLAGS,
-    VIRTUAL_KEY, VK_BACK,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_BACK,
 };
 
 use crate::config::MAGIC_EXTRA_INFO;
@@ -49,6 +50,52 @@ fn make_unicode_input(ch: u16, key_up: bool) -> INPUT {
     }
 }
 
+/// 补全任务
+struct CompleteTask {
+    buffer_len: usize,
+    correct_word: String,
+}
+
+/// 全局模拟输入任务发送器（懒加载初始化）
+static mut SIMULATE_SENDER: Option<Sender<CompleteTask>> = None;
+
+/// 初始化后台模拟输入线程（幂等，只启动一次）
+pub fn init_simulate_worker() {
+    static mut INITIALIZED: bool = false;
+    unsafe {
+        if INITIALIZED {
+            return;
+        }
+        INITIALIZED = true;
+    }
+
+    let (tx, rx): (Sender<CompleteTask>, Receiver<CompleteTask>) = unbounded();
+    unsafe {
+        SIMULATE_SENDER = Some(tx);
+    }
+
+    thread::spawn(move || {
+        while let Ok(task) = rx.recv() {
+            complete_word_sync(task.buffer_len, &task.correct_word);
+        }
+    });
+}
+
+/// 异步触发补全，立即返回，不阻塞调用方
+pub fn complete_word(buffer_len: usize, correct_word: &str) {
+    unsafe {
+        if let Some(ref tx) = SIMULATE_SENDER {
+            let _ = tx.send(CompleteTask {
+                buffer_len,
+                correct_word: correct_word.to_string(),
+            });
+        } else {
+            // 若未初始化则退化为同步执行（兼容旧调用）
+            complete_word_sync(buffer_len, correct_word);
+        }
+    }
+}
+
 /// Tab 补全：批量退格 → 等待处理 → 批量输入正确单词。
 ///
 /// # 叠字根因与修复
@@ -62,7 +109,7 @@ fn make_unicode_input(ch: u16, key_up: bool) -> INPUT {
 /// 2. **处理间隔**: 退格完成后等待 `buffer_len × 2ms + 10ms`，
 ///    确保 OS 已完成字符删除再发送新文本。
 /// 3. **批量输入**: 所有 Unicode 字符同样打包发送。
-pub fn complete_word(buffer_len: usize, correct_word: &str) {
+fn complete_word_sync(buffer_len: usize, correct_word: &str) {
     println!(
         "[Simulate] 补全: 批量退格 {} 次, 等待后输入 '{}'",
         buffer_len, correct_word
@@ -77,14 +124,15 @@ pub fn complete_word(buffer_len: usize, correct_word: &str) {
 
     for _ in 0..buffer_len {
         batch.push(make_key_input(VK_BACK, KEYBD_EVENT_FLAGS(0))); // DOWN
-        batch.push(make_key_input(VK_BACK, KEYEVENTF_KEYUP));      // UP
+        batch.push(make_key_input(VK_BACK, KEYEVENTF_KEYUP)); // UP
     }
 
     let size = std::mem::size_of::<INPUT>() as i32;
     let sent = unsafe { SendInput(&batch, size) };
     println!(
         "[Simulate] 已发送 {} 个退格事件 (请求 {} 次)",
-        sent, buffer_len * 2
+        sent,
+        buffer_len * 2
     );
 
     // ── 阶段 2: 等待 OS 完成退格处理 ──
@@ -99,7 +147,7 @@ pub fn complete_word(buffer_len: usize, correct_word: &str) {
         let encoded = ch.encode_utf16(&mut buf);
         for code_unit in encoded {
             batch.push(make_unicode_input(*code_unit, false)); // DOWN
-            batch.push(make_unicode_input(*code_unit, true));  // UP
+            batch.push(make_unicode_input(*code_unit, true)); // UP
         }
     }
 

@@ -15,24 +15,27 @@ global Palette {
 }
 
 component TitleButton inherits Rectangle {
-    in property <string> label: "";
+    in property <int> icon-kind: 0;
     in property <bool> danger: false;
     callback clicked;
 
-    width: 34px;
-    height: 32px;
-    border-radius: 6px;
+    width: 36px;
+    height: 36px;
+    border-radius: 5px;
     background: transparent;
 
-    Text {
-        text: root.label;
-        font-size: label == "-" ? 18px : 13px;
-        font-weight: 700;
-        color: Palette.text-secondary;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-        width: 100%;
-        height: 100%;
+    Path {
+        x: 12px;
+        y: 12px;
+        width: 12px;
+        height: 12px;
+        commands: root.icon-kind == 0
+            ? "M 1 8 L 11 8"
+            : root.icon-kind == 1
+                ? "M 1 1 L 11 1 L 11 11 L 1 11 Z"
+                : "M 2 2 L 10 10 M 10 2 L 2 10";
+        stroke: root.danger && area.has-hover ? white : Palette.text-secondary;
+        stroke-width: 1.4px;
     }
 
     area := TouchArea {
@@ -179,7 +182,7 @@ component ResizeHandle inherits Rectangle {
         width: 100%;
         height: 100%;
         pointer-event(pe) => {
-            if pe.kind == PointerEventKind.down {
+            if pe.button == PointerEventButton.left && pe.kind == PointerEventKind.down {
                 root.resize(root.hit-test);
             }
         }
@@ -187,7 +190,7 @@ component ResizeHandle inherits Rectangle {
 }
 
 export component SettingsWindow inherits Window {
-    title: "easy2type";
+    title: "easy2type 设置";
     preferred-width: 600px;
     preferred-height: 520px;
     min-width: 560px;
@@ -208,6 +211,8 @@ export component SettingsWindow inherits Window {
     in-out property <string> dictionary-path: "assets/words.txt";
     in-out property <string> overlay-skin-name: "memphis";
     in-out property <string> custom-skin-path: "";
+    in-out property <string> status-message: "";
+    in-out property <bool> status-error: false;
 
     callback toggle-active(bool);
     callback start-record-toggle-shortcut();
@@ -217,17 +222,15 @@ export component SettingsWindow inherits Window {
     callback toggle-filter-digits(bool);
     callback toggle-filter-urls(bool);
     callback switch-dictionary(string);
-    callback import-dictionary(string);
+    callback import-dictionary();
     callback switch-overlay-skin(string);
-    callback import-custom-skin(string);
+    callback import-custom-skin();
     callback start-drag();
     callback start-resize(int);
     callback window-hide();
     callback window-minimize();
     callback window-maximize-restore(bool);
     callback window-close();
-    callback notify-saved(string);
-    callback notify-error(string);
 
     Rectangle {
         width: 100%;
@@ -265,7 +268,7 @@ export component SettingsWindow inherits Window {
                         width: 100%;
                         height: 100%;
                         pointer-event(pe) => {
-                            if pe.kind == PointerEventKind.down {
+                            if pe.button == PointerEventButton.left && pe.kind == PointerEventKind.down {
                                 root.start-drag();
                             }
                         }
@@ -276,9 +279,9 @@ export component SettingsWindow inherits Window {
                     padding-right: 10px;
                     spacing: 3px;
                     alignment: end;
-                    TitleButton { label: "-"; clicked => { root.window-minimize(); } }
-                    TitleButton { label: root.is-maximized ? "▣" : "□"; clicked => { root.window-maximize-restore(root.is-maximized); } }
-                    TitleButton { label: "X"; danger: true; clicked => { root.window-close(); } }
+                    TitleButton { icon-kind: 0; clicked => { root.window-minimize(); } }
+                    TitleButton { icon-kind: 1; clicked => { root.window-maximize-restore(root.is-maximized); } }
+                    TitleButton { icon-kind: 2; danger: true; clicked => { root.window-close(); } }
                 }
             }
 
@@ -431,8 +434,7 @@ export component SettingsWindow inherits Window {
                                     Button {
                                         text: "导入";
                                         clicked => {
-                                            root.current-dictionary = "自定义导入词库";
-                                            root.import-dictionary(root.dictionary-path);
+                                            root.import-dictionary();
                                         }
                                     }
                                 }
@@ -476,8 +478,7 @@ export component SettingsWindow inherits Window {
                                     Button {
                                         text: "导入皮肤";
                                         clicked => {
-                                            root.overlay-skin-name = "custom";
-                                            root.import-custom-skin(root.custom-skin-path);
+                                            root.import-custom-skin();
                                         }
                                     }
                                 }
@@ -485,6 +486,18 @@ export component SettingsWindow inherits Window {
                             }
                         }
                     }
+                }
+            }
+
+            if root.status-message != "": Rectangle {
+                height: 32px;
+                background: root.status-error ? #FDECEC : #EAF7EF;
+                Text {
+                    text: root.status-message;
+                    color: root.status-error ? Palette.danger : #237A43;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
                 }
             }
         }
