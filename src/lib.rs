@@ -8,6 +8,7 @@ pub mod hook;
 pub mod buffer;
 pub mod dictionary;
 pub mod predictor;
+pub mod next_word;
 pub mod tray;
 pub mod caret;
 pub mod overlay;

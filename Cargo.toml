@@ -1,6 +1,6 @@
 [package]
 name = "easy2type"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "Windows 桌面英文输入辅助工具 — Slint 孟菲斯风 + 模糊纠错"
 

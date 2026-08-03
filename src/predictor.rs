@@ -6,8 +6,9 @@
 //!
 //! 多候选排序规则：主键距离 ASC，次键词频 DESC。
 
-use crate::dictionary::Trie;
 use crate::config;
+use crate::dictionary::Trie;
+use crate::next_word::NextWordModel;
 
 /// 候选词条目
 #[derive(Clone, Debug)]
@@ -19,12 +20,16 @@ pub struct Candidate {
 /// 预测引擎
 pub struct Predictor {
     trie: Trie,
+    next_word: NextWordModel,
 }
 
 impl Predictor {
     /// 使用预构建的 Trie 创建预测引擎
     pub fn new(trie: Trie) -> Self {
-        Self { trie }
+        Self {
+            trie,
+            next_word: NextWordModel::load_builtin(),
+        }
     }
 
     /// 根据前缀搜索最佳预测（仅精确前缀匹配）
@@ -76,9 +81,9 @@ impl Predictor {
 
         // ── 阶段 2: 模糊纠错 ──
         if lower.len() >= config::FUZZY_MIN_PREFIX_LEN {
-            let mut candidates =
-                self.trie
-                    .fuzzy_search_with_distance(&lower, config::MAX_FUZZY_DISTANCE);
+            let mut candidates = self
+                .trie
+                .fuzzy_search_with_distance(&lower, config::MAX_FUZZY_DISTANCE);
 
             // 按 (距离 ASC, 权重 DESC) 排序
             candidates.sort_by(|a, b| a.2.cmp(&b.2).then(b.1.cmp(&a.1)));
@@ -133,7 +138,10 @@ impl Predictor {
 
         let fuzzy_candidates: Vec<Candidate> = fuzzy_matches
             .into_iter()
-            .map(|(word, _, dist)| Candidate { word, distance: dist })
+            .map(|(word, _, dist)| Candidate {
+                word,
+                distance: dist,
+            })
             .collect();
 
         // 合并: 精确在前，模糊在后
@@ -141,6 +149,41 @@ impl Predictor {
         all.extend(fuzzy_candidates);
         all.truncate(limit);
         all
+    }
+
+    /// 基于已确认上下文预测当前词或下一个词。
+    pub fn suggest_with_context(
+        &self,
+        context: &[String],
+        input: &str,
+        limit: usize,
+    ) -> Vec<Candidate> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut candidates: Vec<Candidate> = self
+            .next_word
+            .suggest(context, input, limit)
+            .into_iter()
+            .map(|(word, _)| Candidate { word, distance: 0 })
+            .collect();
+
+        if !input.is_empty() && candidates.len() < limit {
+            for candidate in self.suggest_top_n(input, limit) {
+                if candidates
+                    .iter()
+                    .all(|current| current.word != candidate.word)
+                {
+                    candidates.push(candidate);
+                    if candidates.len() == limit {
+                        break;
+                    }
+                }
+            }
+        }
+
+        candidates
     }
 
     /// 模糊搜索：查找编辑距离 ≤ max_distance 的所有单词（按权重降序）
@@ -198,7 +241,10 @@ mod tests {
         assert!(result.is_some());
         let (word, dist) = result.unwrap();
         assert_eq!(word, "the", "\"teh\" 应纠正为 \"the\"");
-        assert_eq!(dist, 1, "teh→the 需要交换两个字符，在 Damerau-Levenshtein 算法下编辑距离为 1");
+        assert_eq!(
+            dist, 1,
+            "teh→the 需要交换两个字符，在 Damerau-Levenshtein 算法下编辑距离为 1"
+        );
     }
 
     #[test]
@@ -236,5 +282,23 @@ mod tests {
         let (word, dist) = result.unwrap();
         assert_eq!(word, "cap"); // 距离 1 优先于 cat 的距离 2
         assert_eq!(dist, 1);
+    }
+
+    #[test]
+    fn test_next_word_after_what() {
+        let trie = dictionary::load_dictionary();
+        let pred = Predictor::new(trie);
+        let candidates = pred.suggest_with_context(&["what".into()], "", 4);
+        assert_eq!(candidates[0].word, "does");
+    }
+
+    #[test]
+    fn test_contextual_prefix_keeps_dictionary_fallback() {
+        let trie = dictionary::load_dictionary();
+        let pred = Predictor::new(trie);
+        let candidates = pred.suggest_with_context(&["what".into()], "env", 4);
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.word == "environment"));
     }
 }

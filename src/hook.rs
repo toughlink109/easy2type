@@ -309,9 +309,35 @@ unsafe extern "system" fn keyboard_hook_proc(
         let alt_down = GetAsyncKeyState(VK_MENU as i32) < 0;
         let win_down = GetAsyncKeyState(VK_LWIN as i32) < 0 || GetAsyncKeyState(VK_RWIN as i32) < 0;
 
+        // 候选框可见时由 easy2type 接管 Tab，避免原应用切换焦点。
+        if G_OSD_VISIBLE.load(Ordering::Relaxed)
+            && vk_code == VK_TAB
+            && !ctrl_down
+            && !shift_down
+            && !alt_down
+            && !win_down
+        {
+            if is_key_down {
+                let event = KeyEvent {
+                    vk_code,
+                    is_key_down: true,
+                    ctrl_down,
+                    shift_down,
+                    is_extended: (kb.flags.0 & 0x0001u32) != 0,
+                };
+                if let Ok(sender) = G_HOOK_SENDER.try_lock() {
+                    if let Some(ref tx) = *sender {
+                        let _ = tx.send(HookCommand::Key(event));
+                    }
+                }
+            }
+            return LRESULT(1);
+        }
+
         // ── 数字键 1~9 直选候选词（仅 OSD 可见 + 无 Ctrl/Alt/Win） ──
         if G_OSD_VISIBLE.load(Ordering::Relaxed)
-            && is_digit_key(vk_code)
+            && vk_code >= '1' as u32
+            && vk_code <= '9' as u32
             && !ctrl_down
             && !alt_down
             && !win_down

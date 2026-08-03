@@ -5,37 +5,37 @@
 
 #![windows_subsystem = "windows"]
 
-mod config;
-mod state;
-mod hook;
 mod buffer;
-mod dictionary;
-mod predictor;
-mod tray;
 mod caret;
+mod config;
+mod dictionary;
+mod hook;
+mod next_word;
 mod overlay;
-mod simulate;
+mod predictor;
 mod settings;
+mod simulate;
+mod state;
+mod tray;
 #[macro_use]
 mod logger;
 
 use std::sync::Arc;
 
-use windows::core::{PCWSTR, w};
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW,
-    RegisterClassW, PostQuitMessage, TranslateMessage, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, MSG, CS_HREDRAW, CS_VREDRAW,
-    WM_DESTROY, WM_CLOSE, WM_COMMAND, WM_QUIT, PM_REMOVE, DestroyWindow,
-    WM_LBUTTONUP, WM_RBUTTONUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+    PostQuitMessage, RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
+    PM_REMOVE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_QUIT, WM_RBUTTONUP, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW,
 };
 
-use crate::state::AppState;
 use crate::buffer::BufferAction;
+use crate::hook::{is_digit_key, VK_TAB};
+use crate::state::AppState;
 use crate::tray::WM_APP_TRAY;
-use crate::hook::{VK_TAB, is_digit_key};
 
 const WINDOW_CLASS_NAME: PCWSTR = w!("Easy2TypeMain");
 
@@ -43,8 +43,6 @@ const WINDOW_CLASS_NAME: PCWSTR = w!("Easy2TypeMain");
 static mut G_APP_STATE: Option<Arc<AppState>> = None;
 static mut G_TRAY_MANAGER: Option<tray::TrayManager> = None;
 static mut G_OVERLAY: Option<overlay::Overlay> = None;
-
-
 
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
@@ -68,7 +66,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_COMMAND => {
             let cmd_id = (w_param.0 & 0xFFFF) as u32;
-            debug_log!("Main", "WM_COMMAND cmd_id={} (raw_wparam=0x{:x})", cmd_id, w_param.0);
+            debug_log!(
+                "Main",
+                "WM_COMMAND cmd_id={} (raw_wparam=0x{:x})",
+                cmd_id,
+                w_param.0
+            );
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 if tray.handle_menu_command(cmd_id) {
                     debug_log!("Main", "菜单命令 {} 已处理", cmd_id);
@@ -80,8 +83,13 @@ unsafe extern "system" fn wnd_proc(
         }
         m if m == WM_APP_TRAY => {
             let event = l_param.0 as u32;
-            debug_log!("Main", "WM_APP_TRAY event={} (LBUTTONUP={} RBUTTONUP={})",
-                event, WM_LBUTTONUP, WM_RBUTTONUP);
+            debug_log!(
+                "Main",
+                "WM_APP_TRAY event={} (LBUTTONUP={} RBUTTONUP={})",
+                event,
+                WM_LBUTTONUP,
+                WM_RBUTTONUP
+            );
             if let Some(ref mut tray) = G_TRAY_MANAGER {
                 tray.handle_message(l_param);
             } else {
@@ -124,15 +132,79 @@ unsafe fn create_hidden_window(h_instance: HINSTANCE) -> Result<HWND, windows::c
     Ok(hwnd)
 }
 
+unsafe fn hide_prediction_overlay(app_state: &AppState) {
+    *app_state.prediction.lock().unwrap() = None;
+    if let Some(ref overlay) = G_OVERLAY {
+        overlay.hide();
+    }
+    hook::set_osd_visible(false);
+}
+
+unsafe fn show_prediction_overlay(
+    app_state: &AppState,
+    predictor: &predictor::Predictor,
+    input: &str,
+) -> bool {
+    let limit = app_state.config.lock().unwrap().candidate_limit;
+    let context = app_state.get_context();
+    let candidates = predictor.suggest_with_context(&context, input, limit);
+    if candidates.is_empty() {
+        hide_prediction_overlay(app_state);
+        return false;
+    }
+
+    let Some(caret) = caret::get_caret_pos() else {
+        hide_prediction_overlay(app_state);
+        return false;
+    };
+    let Some(ref overlay) = G_OVERLAY else {
+        return false;
+    };
+
+    *app_state.prediction.lock().unwrap() = Some(candidates[0].word.clone());
+    overlay.show_candidates(input, &candidates, caret);
+    hook::set_osd_visible(true);
+    true
+}
+
+unsafe fn accept_candidate(app_state: &AppState, selected_index: Option<usize>) -> bool {
+    let Some(ref overlay) = G_OVERLAY else {
+        return false;
+    };
+    if let Some(index) = selected_index {
+        if !overlay.set_selected(index) {
+            return false;
+        }
+    }
+    let Some((word, _)) = overlay.selected_info() else {
+        return false;
+    };
+    let buffer = app_state.get_buffer();
+    simulate::complete_word_with_space(buffer.len(), &word);
+    app_state.commit_word(&word);
+    app_state.clear_buffer();
+    hide_prediction_overlay(app_state);
+    true
+}
+
 unsafe fn run_event_loop(
     hook_rx: crossbeam::channel::Receiver<hook::HookCommand>,
     hook_stop: Arc<std::sync::atomic::AtomicBool>,
     app_state: Arc<AppState>,
     predictor: predictor::Predictor,
 ) {
-    debug_log!("Main", "事件循环开始 tid={:?} Slint={}",
+    debug_log!(
+        "Main",
+        "事件循环开始 tid={:?} Slint={}",
         std::thread::current().id(),
-        if cfg!(feature = "slint-ui") { "ON" } else { "OFF" });
+        if cfg!(feature = "slint-ui") {
+            "ON"
+        } else {
+            "OFF"
+        }
+    );
+
+    let mut pending_next_prediction: Option<std::time::Instant> = None;
 
     loop {
         // 1. Windows 消息
@@ -150,6 +222,13 @@ unsafe fn run_event_loop(
 
         // 2c. 快捷键捕获由设置面板线程自行轮询，主循环不消费
 
+        // 模拟输入完成后再读取光标，保证下一词候选紧跟新插入的空格。
+        if pending_next_prediction.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            pending_next_prediction = None;
+            let input = app_state.get_buffer();
+            show_prediction_overlay(&app_state, &predictor, &input);
+        }
+
         // 3. 钩子事件
         loop {
             match hook_rx.try_recv() {
@@ -159,31 +238,27 @@ unsafe fn run_event_loop(
                         let _ = tray.update_tooltip();
                     }
                     if !new_mode.is_active() {
-                        if let Some(ref overlay) = G_OVERLAY {
-                            overlay.hide();
-                            hook::set_osd_visible(false);
-                        }
+                        pending_next_prediction = None;
+                        app_state.clear_buffer();
+                        app_state.clear_context();
+                        hide_prediction_overlay(&app_state);
                     }
-                    debug_log!("Main", "ToggleMode -> {}", if new_mode.is_active() { "开启" } else { "隐形" });
+                    debug_log!(
+                        "Main",
+                        "ToggleMode -> {}",
+                        if new_mode.is_active() {
+                            "开启"
+                        } else {
+                            "隐形"
+                        }
+                    );
                     continue;
                 }
                 Ok(hook::HookCommand::SelectN(n)) => {
                     debug_log!("Main", "SelectN({})", n);
-                    let buffer_len = app_state.get_buffer().len();
-                    if buffer_len > 0 {
-                        if let Some(ref overlay) = G_OVERLAY {
-                            // set_selected 会检查越界，越界时直接忽略
-                            if overlay.set_selected(n) {
-                                if let Some((word, _)) = overlay.selected_info() {
-                                    debug_log!("Main", "数字{}选词: '{}' -> '{}'", n + 1, app_state.get_buffer(), word);
-                                    simulate::complete_word(buffer_len, &word);
-                                    app_state.clear_buffer();
-                                    *app_state.prediction.lock().unwrap() = None;
-                                    overlay.hide();
-                                    hook::set_osd_visible(false);
-                                }
-                            }
-                        }
+                    if accept_candidate(&app_state, Some(n)) {
+                        pending_next_prediction =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(80));
                     }
                     continue;
                 }
@@ -202,52 +277,21 @@ unsafe fn run_event_loop(
                     // ── Ctrl+数字键: 直接选候选词（不经过 buffer） ──
                     if event.ctrl_down && is_digit_key(event.vk_code) {
                         let digit = (event.vk_code - '0' as u32) as usize;
-                        // 数字键 1~9 对应索引 0~8
-                        if digit >= 1 && digit <= 9 {
-                            let idx = digit - 1;
-                            if let Some(ref overlay) = G_OVERLAY {
-                                // 先更新选中高亮，越界则忽略
-                                if !overlay.set_selected(idx) {
-                                    continue;
-                                }
-                                if let Some((word, _)) = overlay.selected_info() {
-                                    // 用当前选中的词执行补全
-                                    let buffer_len = app_state.get_buffer().len();
-                                    if buffer_len > 0 {
-                                        let selected = overlay.selected_word()
-                                            .unwrap_or(word);
-                                        println!(
-                                            "[Main] Ctrl+{} 选中 #{}, 补全: '{}' -> '{}'",
-                                            digit, digit,
-                                            app_state.get_buffer(), selected
-                                        );
-                                        simulate::complete_word(buffer_len, &selected);
-                                        app_state.clear_buffer();
-                                        *app_state.prediction.lock().unwrap() = None;
-                                        overlay.hide();
-                                    }
-                                }
-                            }
+                        if (1..=9).contains(&digit) && accept_candidate(&app_state, Some(digit - 1))
+                        {
+                            pending_next_prediction = Some(
+                                std::time::Instant::now() + std::time::Duration::from_millis(80),
+                            );
                         }
                         continue;
                     }
 
                     // ── Tab 补全（默认选中第 1 个候选） ──
                     if event.vk_code == VK_TAB {
-                        let buffer_len = app_state.get_buffer().len();
-                        if buffer_len > 0 {
-                            if let Some(ref overlay) = G_OVERLAY {
-                                if let Some((word, idx)) = overlay.selected_info() {
-                                    println!(
-                                        "[Main] Tab 补全 #{}: '{}' -> '{}'",
-                                        idx + 1, app_state.get_buffer(), word
-                                    );
-                                    simulate::complete_word(buffer_len, &word);
-                                    app_state.clear_buffer();
-                                    *app_state.prediction.lock().unwrap() = None;
-                                    overlay.hide();
-                                }
-                            }
+                        if accept_candidate(&app_state, None) {
+                            pending_next_prediction = Some(
+                                std::time::Instant::now() + std::time::Duration::from_millis(80),
+                            );
                         }
                         continue;
                     }
@@ -257,54 +301,18 @@ unsafe fn run_event_loop(
 
                     match action {
                         BufferAction::UpdatePrediction => {
+                            pending_next_prediction = None;
                             let buf = app_state.get_buffer();
-                            if !buf.is_empty() {
-                                let limit = app_state.config.lock().unwrap().candidate_limit;
-                                let candidates = predictor.suggest_top_n(
-                                    &buf,
-                                    limit,
-                                );
-
-                                if !candidates.is_empty() {
-                                    // 存储最佳预测以兼容旧逻辑
-                                    *app_state.prediction.lock().unwrap() =
-                                        Some(candidates[0].word.clone());
-
-                                    // 显示多候选悬浮窗
-                                    if let Some(caret) = caret::get_caret_pos() {
-                                        if let Some(ref overlay) = G_OVERLAY {
-                                            if candidates[0].distance > 0 {
-                                                println!(
-                                                    "[Main] 模糊纠错 (距离={}): '{}' -> '{}' (共 {} 候选)",
-                                                    candidates[0].distance,
-                                                    buf,
-                                                    candidates[0].word,
-                                                    candidates.len()
-                                                );
-                                            }
-                                            overlay.show_candidates(
-                                                &buf,
-                                                &candidates,
-                                                caret,
-                                            );
-                                            hook::set_osd_visible(true);
-                                        }
-                                    }
-                                } else {
-                                    *app_state.prediction.lock().unwrap() = None;
-                                    if let Some(ref overlay) = G_OVERLAY {
-                                        overlay.hide();
-                                        hook::set_osd_visible(false);
-                                    }
-                                }
-                            }
+                            show_prediction_overlay(&app_state, &predictor, &buf);
+                        }
+                        BufferAction::PredictNextWord => {
+                            pending_next_prediction = Some(
+                                std::time::Instant::now() + std::time::Duration::from_millis(40),
+                            );
                         }
                         BufferAction::ClearPrediction => {
-                            *app_state.prediction.lock().unwrap() = None;
-                            if let Some(ref overlay) = G_OVERLAY {
-                                overlay.hide();
-                                hook::set_osd_visible(false);
-                            }
+                            pending_next_prediction = None;
+                            hide_prediction_overlay(&app_state);
                         }
                         BufferAction::NoOp => {}
                     }
@@ -333,7 +341,11 @@ fn main() {
     debug_log!("Main", "COM 初始化完成");
 
     let app_config = config::AppConfig::load("config.json");
-    debug_log!("Main", "配置加载: candidates={}", app_config.candidate_limit);
+    debug_log!(
+        "Main",
+        "配置加载: candidates={}",
+        app_config.candidate_limit
+    );
 
     // 初始化模拟输入后台线程，避免补全时阻塞 UI
     simulate::init_simulate_worker();
@@ -349,8 +361,7 @@ fn main() {
     debug_log!("Main", "词库就绪: {} 词", word_count);
 
     let h_instance = unsafe {
-        windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .expect("获取模块句柄失败")
+        windows::Win32::System::LibraryLoader::GetModuleHandleW(None).expect("获取模块句柄失败")
     };
 
     // ── 钩子线程: 独立 GetMessageW 消息泵 ──
@@ -363,12 +374,13 @@ fn main() {
         debug_log!("Main", "隐藏消息窗口已创建");
 
         let overlay_config = app_state.config.lock().unwrap().clone();
-        let overlay = overlay::Overlay::new(h_instance.into(), &overlay_config).expect("创建覆盖层失败");
+        let overlay =
+            overlay::Overlay::new(h_instance.into(), &overlay_config).expect("创建覆盖层失败");
         debug_log!("Main", "OSD 覆盖层已创建");
 
         G_APP_STATE = Some(app_state.clone());
-        let mut tray_mgr = tray::TrayManager::new(hwnd, app_state.clone())
-            .expect("创建托盘图标失败");
+        let mut tray_mgr =
+            tray::TrayManager::new(hwnd, app_state.clone()).expect("创建托盘图标失败");
         debug_log!("Main", "托盘图标已创建");
 
         // 注册设置面板回调

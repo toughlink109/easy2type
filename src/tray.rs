@@ -233,7 +233,7 @@ impl TrayManager {
                 unsafe {
                     let _ = MessageBoxW(
                         self.hwnd,
-                        w!("easy2type v0.7.1\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("easy2type v0.7.2\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
                         w!("关于 easy2type"),
                         MB_OK | MB_ICONINFORMATION,
                     );
@@ -276,7 +276,7 @@ impl TrayManager {
                 unsafe {
                     let _ = MessageBoxW(
                         self.hwnd,
-                        w!("easy2type v0.7.1\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
+                        w!("easy2type v0.7.2\n\nWindows 桌面英文输入辅助工具 (Inline 单词预测与补全)\n\n基于 Rust + GDI + Slint 构建。"),
                         w!("关于 easy2type"),
                         MB_OK | MB_ICONINFORMATION,
                     );

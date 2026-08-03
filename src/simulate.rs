@@ -54,6 +54,7 @@ fn make_unicode_input(ch: u16, key_up: bool) -> INPUT {
 struct CompleteTask {
     buffer_len: usize,
     correct_word: String,
+    append_space: bool,
 }
 
 /// 全局模拟输入任务发送器（懒加载初始化）
@@ -76,22 +77,32 @@ pub fn init_simulate_worker() {
 
     thread::spawn(move || {
         while let Ok(task) = rx.recv() {
-            complete_word_sync(task.buffer_len, &task.correct_word);
+            complete_word_sync(task.buffer_len, &task.correct_word, task.append_space);
         }
     });
 }
 
 /// 异步触发补全，立即返回，不阻塞调用方
 pub fn complete_word(buffer_len: usize, correct_word: &str) {
+    enqueue_completion(buffer_len, correct_word, false);
+}
+
+/// 补全或插入候选词，并在词后自动加入空格以继续下一词预测。
+pub fn complete_word_with_space(buffer_len: usize, correct_word: &str) {
+    enqueue_completion(buffer_len, correct_word, true);
+}
+
+fn enqueue_completion(buffer_len: usize, correct_word: &str, append_space: bool) {
     unsafe {
         if let Some(ref tx) = SIMULATE_SENDER {
             let _ = tx.send(CompleteTask {
                 buffer_len,
                 correct_word: correct_word.to_string(),
+                append_space,
             });
         } else {
             // 若未初始化则退化为同步执行（兼容旧调用）
-            complete_word_sync(buffer_len, correct_word);
+            complete_word_sync(buffer_len, correct_word, append_space);
         }
     }
 }
@@ -109,15 +120,11 @@ pub fn complete_word(buffer_len: usize, correct_word: &str) {
 /// 2. **处理间隔**: 退格完成后等待 `buffer_len × 2ms + 10ms`，
 ///    确保 OS 已完成字符删除再发送新文本。
 /// 3. **批量输入**: 所有 Unicode 字符同样打包发送。
-fn complete_word_sync(buffer_len: usize, correct_word: &str) {
+fn complete_word_sync(buffer_len: usize, correct_word: &str, append_space: bool) {
     println!(
         "[Simulate] 补全: 批量退格 {} 次, 等待后输入 '{}'",
         buffer_len, correct_word
     );
-
-    if buffer_len == 0 {
-        return;
-    }
 
     // ── 阶段 1: 批量 Backspace ──
     let mut batch: Vec<INPUT> = Vec::with_capacity(buffer_len * 2);
@@ -128,12 +135,14 @@ fn complete_word_sync(buffer_len: usize, correct_word: &str) {
     }
 
     let size = std::mem::size_of::<INPUT>() as i32;
-    let sent = unsafe { SendInput(&batch, size) };
-    println!(
-        "[Simulate] 已发送 {} 个退格事件 (请求 {} 次)",
-        sent,
-        buffer_len * 2
-    );
+    if !batch.is_empty() {
+        let sent = unsafe { SendInput(&batch, size) };
+        println!(
+            "[Simulate] 已发送 {} 个退格事件 (请求 {} 次)",
+            sent,
+            buffer_len * 2
+        );
+    }
 
     // ── 阶段 2: 等待 OS 完成退格处理 ──
     // 经验公式: buffer_len × 2ms + 10ms 底线
@@ -142,7 +151,8 @@ fn complete_word_sync(buffer_len: usize, correct_word: &str) {
 
     // ── 阶段 3: 批量输入正确单词 ──
     batch.clear();
-    for ch in correct_word.chars() {
+    let completion_text = completion_text(correct_word, append_space);
+    for ch in completion_text.chars() {
         let mut buf = [0u16; 2];
         let encoded = ch.encode_utf16(&mut buf);
         for code_unit in encoded {
@@ -156,4 +166,23 @@ fn complete_word_sync(buffer_len: usize, correct_word: &str) {
         "[Simulate] 已发送 {} 个文本事件 (单词 '{}')",
         sent, correct_word
     );
+}
+
+fn completion_text(correct_word: &str, append_space: bool) -> String {
+    if append_space {
+        format!("{} ", correct_word.trim_end())
+    } else {
+        correct_word.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn appends_space_for_continuous_prediction() {
+        assert_eq!(completion_text("does", true), "does ");
+        assert_eq!(completion_text("does", false), "does");
+    }
 }

@@ -2,8 +2,8 @@
 //!
 //! AppState 是线程安全的全局单例，各模块通过 Arc<AppState> 共享访问。
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 
 /// 程序运行模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,8 @@ pub struct AppState {
     pub buffer: Mutex<String>,
     /// 当前预测词（None 表示无预测）
     pub prediction: Mutex<Option<String>>,
+    /// 最近确认的单词，用于下一词和短语预测。
+    pub context: Mutex<Vec<String>>,
     /// 运行时配置
     pub config: Mutex<crate::config::AppConfig>,
 }
@@ -55,6 +57,7 @@ impl AppState {
             mode: AtomicU8::new(AppMode::Active as u8),
             buffer: Mutex::new(String::new()),
             prediction: Mutex::new(None),
+            context: Mutex::new(Vec::new()),
             config: Mutex::new(config),
         }
     }
@@ -88,5 +91,53 @@ impl AppState {
 
     pub fn clear_buffer(&self) {
         self.buffer.lock().unwrap().clear();
+    }
+
+    pub fn commit_word(&self, word: &str) {
+        let word = word.trim().to_ascii_lowercase();
+        if word.is_empty()
+            || !word
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic() || ch == '\'' || ch == '-')
+        {
+            return;
+        }
+
+        let mut context = self.context.lock().unwrap();
+        context.push(word);
+        if context.len() > 4 {
+            let remove_count = context.len() - 4;
+            context.drain(0..remove_count);
+        }
+    }
+
+    pub fn get_context(&self) -> Vec<String> {
+        self.context.lock().unwrap().clone()
+    }
+
+    pub fn clear_context(&self) {
+        self.context.lock().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_recent_four_context_words() {
+        let state = AppState::new(crate::config::AppConfig::default());
+        for word in ["one", "two", "three", "four", "five"] {
+            state.commit_word(word);
+        }
+        assert_eq!(state.get_context(), ["two", "three", "four", "five"]);
+    }
+
+    #[test]
+    fn clears_sentence_context() {
+        let state = AppState::new(crate::config::AppConfig::default());
+        state.commit_word("hello");
+        state.clear_context();
+        assert!(state.get_context().is_empty());
     }
 }

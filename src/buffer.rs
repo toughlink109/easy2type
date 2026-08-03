@@ -3,9 +3,9 @@
 //! 维护用户正在输入的单词片段，在每次按键时更新。
 //! 输出预测更新请求，供主线程调用 predictor + overlay。
 
-use crate::hook::{self, KeyEvent, VK_BACK, VK_TAB};
 #[cfg(test)]
-use crate::hook::{VK_OEM_PERIOD, VK_SPACE};
+use crate::hook::VK_OEM_PERIOD;
+use crate::hook::{self, KeyEvent, VK_BACK, VK_RETURN, VK_SPACE, VK_TAB};
 use crate::state::AppState;
 
 /// 处理按键后的动作
@@ -13,6 +13,8 @@ use crate::state::AppState;
 pub enum BufferAction {
     /// 需要重新计算预测
     UpdatePrediction,
+    /// 当前单词已确认，需要预测下一个词
+    PredictNextWord,
     /// 清空预测并隐藏 OSD
     ClearPrediction,
     /// 无需操作
@@ -38,7 +40,8 @@ pub fn process_key_event(event: &KeyEvent, state: &AppState) -> BufferAction {
             }
             return BufferAction::UpdatePrediction;
         }
-        return BufferAction::NoOp;
+        state.clear_context();
+        return BufferAction::ClearPrediction;
     }
 
     // 3. Tab 键：补全由主线程的 simulate 模块处理
@@ -46,17 +49,29 @@ pub fn process_key_event(event: &KeyEvent, state: &AppState) -> BufferAction {
         return BufferAction::NoOp;
     }
 
-    // 4. 清空缓冲区：空格、回车、标点
-    if hook::is_buffer_clear_key(vk) {
-        let mut buffer = state.buffer.lock().unwrap();
-        if !buffer.is_empty() {
+    // 4. 空格确认当前单词，并继续预测下一个词。
+    if vk == VK_SPACE {
+        let word = {
+            let mut buffer = state.buffer.lock().unwrap();
+            let word = buffer.clone();
             buffer.clear();
-            return BufferAction::ClearPrediction;
+            word
+        };
+        if !word.is_empty() {
+            state.commit_word(&word);
+            return BufferAction::PredictNextWord;
         }
         return BufferAction::NoOp;
     }
 
-    // 5. 字母/数字/连字符/撇号：追加到缓冲区
+    // 5. 回车或标点结束当前上下文，避免跨句误预测。
+    if vk == VK_RETURN || hook::is_punctuation_key(vk) {
+        state.clear_buffer();
+        state.clear_context();
+        return BufferAction::ClearPrediction;
+    }
+
+    // 6. 字母/数字/连字符/撇号：追加到缓冲区
     let ch = hook::vk_to_char(vk, event.shift_down);
     if let Some(c) = ch {
         if c.is_ascii_alphabetic() || c == '-' || c == '\'' {
@@ -146,14 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn test_space_clears_buffer() {
+    fn test_space_commits_word_and_predicts_next() {
         let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         process_key_event(&make_event('H' as u32, false, false), &state);
         process_key_event(&make_event('I' as u32, false, false), &state);
 
         let action = process_key_event(&make_event(VK_SPACE, false, false), &state);
         assert_eq!(state.get_buffer(), "");
-        assert_eq!(action, BufferAction::ClearPrediction);
+        assert_eq!(state.get_context(), ["hi"]);
+        assert_eq!(action, BufferAction::PredictNextWord);
     }
 
     #[test]
@@ -161,7 +177,7 @@ mod tests {
         let state = Arc::new(AppState::new(crate::config::AppConfig::default()));
         let action = process_key_event(&make_event(VK_BACK, false, false), &state);
         assert_eq!(state.get_buffer(), "");
-        assert_eq!(action, BufferAction::NoOp);
+        assert_eq!(action, BufferAction::ClearPrediction);
     }
 
     #[test]
@@ -179,6 +195,7 @@ mod tests {
         process_key_event(&make_event('A' as u32, false, false), &state);
         let action = process_key_event(&make_event(VK_OEM_PERIOD, false, false), &state);
         assert_eq!(state.get_buffer(), "");
+        assert!(state.get_context().is_empty());
         assert_eq!(action, BufferAction::ClearPrediction);
     }
 }
